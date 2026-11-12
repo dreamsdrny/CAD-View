@@ -1,0 +1,13 @@
+add_executable(cad_core_tests CoreTests.cpp)
+target_link_libraries(cad_core_tests PRIVATE cad_core cad_io cad_engineering Qt6::Test)
+add_test(NAME core COMMAND cad_core_tests)
+
+add_executable(cad_ui_tests UiTests.cpp)
+target_link_libraries(cad_ui_tests PRIVATE cad_ui Qt6::Test)
+add_test(NAME ui COMMAND cad_ui_tests)
+set_tests_properties(ui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+if(WIN32)
+    get_target_property(qmake_executable Qt6::qmake IMPORTED_LOCATION)
+    get_filename_component(qt_bin_directory "${qmake_executable}" DIRECTORY)
+    set_tests_properties(ui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QPA_PLATFORM_PLUGIN_PATH=${qt_bin_directory}/../plugins/platforms")
+endif()

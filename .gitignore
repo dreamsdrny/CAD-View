@@ -218,3 +218,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- CAD Workbench (C++20 / Qt 6) local build & toolchain artifacts ---
+.toolchain/
+out/
+CMakeUserPresets.json
+aqtinstall.log
