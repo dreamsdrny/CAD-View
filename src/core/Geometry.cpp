@@ -1,6 +1,7 @@
 #include "Geometry.h"
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace cad::geo {
 double length(QPointF a, QPointF b) { return std::hypot(b.x()-a.x(), b.y()-a.y()); }
@@ -19,20 +20,32 @@ QPointF rotate(QPointF p, QPointF center, double degrees) {
     return center+QPointF(v.x()*c-v.y()*s, v.x()*s+v.y()*c);
 }
 QPointF project(QPointF p, QPointF a, QPointF b, bool clamp) {
-    auto d=b-a;
-    double squared=QPointF::dotProduct(d,d);
-    if(squared < epsilon) return a;
-    double t=QPointF::dotProduct(p-a,d)/squared;
-    if(clamp) t=std::clamp(t,0.0,1.0);
-    return a+d*t;
+    long double dx=(long double)b.x()-a.x(),dy=(long double)b.y()-a.y();
+    long double squared=dx*dx+dy*dy;
+    if(squared==0) return a;
+    long double t=(((long double)p.x()-a.x())*dx+((long double)p.y()-a.y())*dy)/squared;
+    if(clamp) t=std::clamp(t,0.0L,1.0L);
+    return {double(a.x()+dx*t),double(a.y()+dy*t)};
 }
 std::optional<QPointF> intersection(QPointF a,QPointF b,QPointF c,QPointF d,bool segments) {
-    auto u=b-a, v=d-c;
-    double det=cross(u,v);
-    if(std::abs(det)<epsilon) return std::nullopt;
-    double t=cross(c-a,v)/det, s=cross(c-a,u)/det;
-    if(segments && (t < -epsilon || t > 1+epsilon || s < -epsilon || s > 1+epsilon)) return std::nullopt;
-    return a+u*t;
+    long double ux=(long double)b.x()-a.x(),uy=(long double)b.y()-a.y();
+    long double vx=(long double)d.x()-c.x(),vy=(long double)d.y()-c.y();
+    long double wx=(long double)c.x()-a.x(),wy=(long double)c.y()-a.y();
+    long double det=ux*vy-uy*vx;
+    long double tol=16*std::numeric_limits<double>::epsilon();
+    long double un=std::hypot(ux,uy),vn=std::hypot(vx,vy);
+    if(un==0||vn==0)return std::nullopt;
+    if(std::abs(det)<=tol*un*vn) {
+        if(!segments||std::abs(wx*uy-wy*ux)>tol*un*std::hypot(wx,wy))return std::nullopt;
+        long double t0=(wx*ux+wy*uy)/(un*un);
+        long double t1=t0+(vx*ux+vy*uy)/(un*un);
+        long double first=std::max(0.0L,std::min(t0,t1)),last=std::min(1.0L,std::max(t0,t1));
+        if(first>last+tol)return std::nullopt;
+        return QPointF(double(a.x()+ux*first),double(a.y()+uy*first));
+    }
+    long double t=(wx*vy-wy*vx)/det,s=(wx*uy-wy*ux)/det;
+    if(segments&&(t < -tol||t > 1+tol||s < -tol||s > 1+tol))return std::nullopt;
+    return QPointF(double(a.x()+ux*t),double(a.y()+uy*t));
 }
 double segmentGap(QPointF a,QPointF b,QPointF c,QPointF d) {
     if(intersection(a,b,c,d)) return 0;
@@ -67,10 +80,20 @@ std::optional<Arc> bulgeArc(QPointF a,QPointF b,double bulge) {
     auto center=(a+b)/2+QPointF(-d.y(),d.x())*(offset/chord);
     return Arc{center,length(center,a),angle(center,a),4*std::atan(bulge)*180/pi};
 }
-QVector<QPointF> arcPoints(const Arc& a,double tolerance) {
-    if(a.radius<epsilon) return {a.center};
-    double step=2*std::acos(std::clamp(1-tolerance/a.radius,-1.0,1.0))*180/pi;
-    int count=std::clamp(int(std::ceil(std::abs(a.sweep)/std::max(0.01,step))),2,8192);
+TessellationStatus tessellationStatus(double radius,double sweepRadians,double tolerance,int minSegments,int maxSegments,int& count) {
+    TessellationStatus status;
+    if(radius<=0||sweepRadians==0){count=minSegments;return status;}
+    double step=4*std::asin(std::sqrt(std::clamp(tolerance/(2*radius),0.0,1.0)));
+    double required=step>0?std::ceil(std::abs(sweepRadians)/step):std::numeric_limits<double>::infinity();
+    count=required>=maxSegments?maxSegments:std::max(minSegments,int(required));
+    double half=std::abs(sweepRadians)/(4*count);
+    status.maxError=std::abs(sweepRadians)/count>pi?2*radius:2*radius*std::sin(half)*std::sin(half);
+    status.budgetExceeded=status.maxError>tolerance*(1+1e-12)||std::abs(sweepRadians)/count>pi;
+    return status;
+}
+QVector<QPointF> arcPoints(const Arc& a,double tolerance,TessellationStatus* status) {
+    if(a.radius<=0) {if(status)*status={};return {a.center};}
+    int count;auto resultStatus=tessellationStatus(a.radius,a.sweep*pi/180,tolerance,2,8192,count);if(status)*status=resultStatus;
     QVector<QPointF> result; result.reserve(count+1);
     for(int i=0;i<=count;++i) {
         double t=(a.start+a.sweep*i/count)*pi/180;

@@ -4,7 +4,7 @@
 
 namespace cad::edit {
 static void fail(const char* message) {throw std::runtime_error(message);}
-Entity clone(const Entity& e) {auto result=e;result.id=0;result.sourceKey.clear();return result;}
+Entity clone(const Entity& e) {auto result=e;result.id=0;result.sourceKey.clear();result.sourceAttributes.clear();return result;}
 Entity offset(const Entity& e,double amount) {
     auto r=clone(e);
     if(e.kind==Kind::Circle) {r.radius+=amount;if(r.radius<=geo::epsilon)fail("偏移后的半径必须大于 0。");}
@@ -73,7 +73,7 @@ Entity join(const QVector<Entity>& lines,double tolerance) {
     return result;
 }
 Entity trimExtend(const Entity& target,const Entity& boundary,int endpoint,bool extend) {
-    if(target.kind!=Kind::Line||boundary.kind!=Kind::Line)fail("修剪/延伸需要两条直线。");
+    if(target.kind!=Kind::Line||boundary.kind!=Kind::Line||target.points.size()!=2||boundary.points.size()!=2||endpoint<0||endpoint>1)fail("修剪/延伸需要两条有效直线。");
     auto a=target.points[0],b=target.points[1],c=boundary.points[0],d=boundary.points[1];
     auto hit=geo::intersection(a,b,c,d,false);
     if(!hit||geo::length(*hit,geo::project(*hit,c,d))>1e-6)fail("没有有效边界交点。");

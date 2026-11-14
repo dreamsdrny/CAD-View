@@ -12,14 +12,19 @@ QString Entity::typeName() const {
     } return {};
 }
 bool Entity::isClosed() const { return closed||kind==Kind::Circle; }
-QVector<QPointF> Entity::outline(double tolerance) const {
+double Entity::maximumWidth() const {
+    if(kind!=Kind::Polyline&&kind!=Kind::Rectangle)return 0;
+    if(constantWidth>0)return constantWidth;
+    double width=0;for(auto w:widths)width=std::max({width,w.first,w.second});return width;
+}
+QVector<QPointF> Entity::outline(double tolerance,geo::TessellationStatus* status) const {
+    if(status)*status={};
     if(points.isEmpty()) return {};
-    if(kind==Kind::Circle||kind==Kind::Arc) return geo::arcPoints({points[0],radius,start,kind==Kind::Circle?360:sweep},tolerance);
+    if(kind==Kind::Circle||kind==Kind::Arc) return geo::arcPoints({points[0],radius,start,kind==Kind::Circle?360:sweep},tolerance,status);
     if(kind==Kind::Ellipse && points.size()==2) {
         auto c=points[0], m=points[1];
         double r=geo::length({},m), end=closed?start+2*geo::pi:sweep;
-        double step=2*std::acos(std::clamp(1-tolerance/std::max(r,geo::epsilon),-1.0,1.0));
-        int count=std::clamp(int(std::ceil((end-start)/std::max(0.001,step))),16,8192);
+        int count;auto resultStatus=geo::tessellationStatus(r,end-start,tolerance,16,8192,count);if(status)*status=resultStatus;
         QVector<QPointF> result; result.reserve(count+1);
         for(int i=0;i<=count;++i) {
             double t=start+(end-start)*i/count;
@@ -31,7 +36,7 @@ QVector<QPointF> Entity::outline(double tolerance) const {
         qsizetype count=closed?points.size():points.size()-1;
         for(qsizetype i=0;i<count;++i) {
             auto arc=geo::bulgeArc(points[i],points[(i+1)%points.size()],bulges.value(i));
-            if(arc) { auto pts=geo::arcPoints(*arc,tolerance); pts.removeLast(); result+=pts; }
+            if(arc) { geo::TessellationStatus part;auto pts=geo::arcPoints(*arc,tolerance,&part);if(status){status->maxError=std::max(status->maxError,part.maxError);status->budgetExceeded|=part.budgetExceeded;}pts.removeLast(); result+=pts; }
             else result.append(points[i]);
         }
         result.append(closed?points.first():points.last());
@@ -66,7 +71,8 @@ QRectF Entity::bounds() const {
         for(double t:params)extrema.append(c+QPointF(m.x()*std::cos(t)-m.y()*ratio*std::sin(t),m.y()*std::cos(t)+m.x()*ratio*std::sin(t)));
         return geo::bounds(extrema);
     }
-    return geo::bounds(outline()).adjusted(-0.005,-0.005,0.005,0.005);
+    double margin=maximumWidth()/2+0.005;
+    return geo::bounds(outline()).adjusted(-margin,-margin,margin,margin);
 }
 double Entity::length() const {
     if(kind==Kind::Circle) return 2*geo::pi*radius;

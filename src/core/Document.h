@@ -25,6 +25,7 @@ public:
     int units=4;
     QHash<EntityId,Entity> entities;
     QMap<QString,Layer> layers{{"0",Layer{}}};
+    QMap<QString,Layer> sourceLayers; // Imported layer state; unchanged fields retain their original DXF tags.
     QByteArray sourceDxf;
     QHash<QString,Entity> baseline;
     QSet<QString> importedKeys;

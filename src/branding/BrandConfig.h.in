@@ -1,0 +1,10 @@
+#pragma once
+
+namespace cad::branding::config {
+inline constexpr char applicationName[] = "@CAD_BRAND_NAME@";
+inline constexpr char iconLabel[] = "@CAD_BRAND_ICON_LABEL@";
+inline constexpr char version[] = "@PROJECT_VERSION@";
+inline constexpr char accent[] = "@CAD_BRAND_ACCENT@";
+inline constexpr char accentLight[] = "@CAD_BRAND_ACCENT_LIGHT@";
+inline constexpr char accentSurface[] = "@CAD_BRAND_ACCENT_SURFACE@";
+}

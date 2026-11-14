@@ -1,0 +1,6 @@
+<RCC>
+    <qresource prefix="/branding">
+        <file alias="qiao.ico">@CAD_ICON_FILE@</file>
+        <file alias="qiao.png">@CAD_ICON_PNG@</file>
+    </qresource>
+</RCC>

@@ -1,4 +1,5 @@
 add_library(cad_ui STATIC CadCanvas.cpp MainWindow.cpp)
-target_link_libraries(cad_ui PUBLIC cad_core cad_io cad_engineering Qt6::Widgets Qt6::Concurrent Qt6::PrintSupport)
-add_executable(CADWorkbench WIN32 main.cpp)
-target_link_libraries(CADWorkbench PRIVATE cad_ui)
+target_link_libraries(cad_ui PUBLIC cad_core cad_io cad_engineering cad_branding Qt6::Widgets Qt6::Concurrent Qt6::PrintSupport)
+add_executable(CAD WIN32 main.cpp ${CAD_WINDOWS_RESOURCE})
+add_dependencies(CAD cad_brand_assets)
+target_link_libraries(CAD PRIVATE cad_ui)

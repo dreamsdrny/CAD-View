@@ -20,13 +20,15 @@ struct Entity {
     QString text;
     bool closed=false;
     QString sourceKey; // immutable source record identity; copies get a new identity
+    QByteArray sourceAttributes; // Conservative fingerprint of imported non-geometric DXF tags.
     bool operator==(const Entity&) const = default;
     QString typeName() const;
-    QVector<QPointF> outline(double tolerance=0.005) const;
+    QVector<QPointF> outline(double tolerance=0.005,geo::TessellationStatus* status=nullptr) const;
     QRectF bounds() const;
     double length() const;
     double area() const;
     bool isClosed() const;
+    double maximumWidth() const;
     QVector<QPair<QPointF,QString>> snapPoints() const;
     QVector<QPair<QString,QString>> properties(const QString& unit) const;
     void translate(QPointF delta);

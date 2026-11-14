@@ -21,6 +21,6 @@ if (-not $SkipTests) {
     if ($LASTEXITCODE -ne 0) { throw 'Native tests failed.' }
 }
 $bin = Join-Path $build 'bin'
-& "$QtRoot\bin\windeployqt.exe" --release --compiler-runtime --no-translations --no-opengl-sw "$bin\CADWorkbench.exe"
+& "$QtRoot\bin\windeployqt.exe" --release --compiler-runtime --no-translations --no-opengl-sw "$bin\CAD.exe"
 if ($LASTEXITCODE -ne 0) { throw 'Qt runtime deployment failed.' }
-Write-Host "Ready: $bin\CADWorkbench.exe"
+Write-Host "Ready: $bin\CAD.exe"

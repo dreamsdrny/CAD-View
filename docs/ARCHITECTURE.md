@@ -3,7 +3,7 @@
 ## 依赖方向
 
 ```text
-CADWorkbench (main)
+CAD (main) ── cad_branding (名称 / Qiao 图标 / 紫色主题)
        ↓
 cad_ui (Qt Widgets / Concurrent / PDF)
        ↓                    ↓
@@ -15,6 +15,14 @@ cad_io              cad_engineering
 ```
 
 `core` 不依赖 Widgets；专业分析不调用窗口对象；文件适配不持有画布。可独立测试并接入未来命令行批处理。
+
+## 品牌与分发
+
+`src/branding` 管理程序名称、版本读取、图标加载与样式。品牌常量在其 `CMakeLists.txt` 中集中定义，版本源于顶层 `project(... VERSION ...)`。
+
+`tools/branding/IconGenerator.cpp` 在构建时生成紫色 Qiao 多尺寸 ICO/PNG，Qt `.qrc` 管理窗口图标，Windows `.rc` 将图标和版本信息嵌入 `CAD.exe`。运行时不依赖外部图标路径。
+
+`scripts/package-native.ps1` 通过 CMake install 建立新的干净分发目录，部署 Qt DLL，再输出便携 ZIP 和 NSIS 安装 EXE，防止旧构建文件或测试程序被混入分发包。详见 `BRANDING_AND_PACKAGING.md`。
 
 ## 模型
 
@@ -47,7 +55,7 @@ QtConcurrent 线程池执行 DXF/DWG 读写和工程检查，QFutureWatcher 在�
 - Qt 容器隐式共享，工作线程只读快照；界面修改时自动分离。
 - 保存完成后仅当几何、图层、单位仍等于保存快照时标记已保存。
 - 检查完成后比对文档与当前标签，变化后不发布旧检查结果。
-- 文档有任务时阻止销毁；退出前等待任务结束。文件操作/分析目前无取消/百分比进度。
+- 文档有任务时阻止销毁；退出前等待任务结束。后台打开可取消；保存和分析目前无取消/百分比进度。
 
 ## DXF 适配
 
@@ -65,4 +73,4 @@ QtConcurrent 线程池执行 DXF/DWG 读写和工程检查，QFutureWatcher 在�
 
 ## 工程分析
 
-分析以显式选区/图层定义对象用途。孔径仅统计圆，焊盘仅检查闭合形状；不推断铜层网络或钻孔镀孔类型。曲线间距离散公差 0.005 文档单位，输出实体 ID 便于界面定位。后续应新增规则模板、角色映射、制造属性、误差区间和报告结构。
+分析以显式选区/图层定义对象用途。孔径仅统计圆，焊盘仅检查闭合形状；不推断铜层网络或钻孔镀孔类型。曲线离散目标误差 0.005 文档单位，超过分段预算时中止并报告误差上界；输出实体 ID 便于界面定位。后续应新增规则模板、角色映射、制造属性、误差区间和报告结构。

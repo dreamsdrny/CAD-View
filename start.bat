@@ -1,7 +1,7 @@
 @echo off
-if not exist "%~dp0build\native\bin\CADWorkbench.exe" (
+if not exist "%~dp0build\native\bin\CAD.exe" (
     echo Native application is not built. Run build.bat first.
     pause
     exit /b 1
 )
-start "CAD Workbench" "%~dp0build\native\bin\CADWorkbench.exe" %*
+start "CAD" "%~dp0build\native\bin\CAD.exe" %*

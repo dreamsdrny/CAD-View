@@ -1,4 +1,5 @@
 #include "CadCanvas.h"
+#include "branding/AppBrand.h"
 #include "core/Editing.h"
 #include <QPainter>
 #include <QPainterPathStroker>
@@ -35,6 +36,35 @@ QPainterPath CadCanvas::pathFor(const Entity& e) {
         Entity label;label.kind=Kind::Text;label.points={(aa+bb)/2+QPointF(0,0.8)};label.text=e.text;label.text.replace("<>",value(len,3));label.height=2;path.addPath(pathFor(label));return path;
     }
     if(e.kind==Kind::Circle){path.addEllipse(e.points[0],e.radius,e.radius);return path;}
+    if(e.maximumWidth()>0) {
+        QPainterPath filled;filled.setFillRule(Qt::WindingFill);
+        qsizetype count=e.closed?e.points.size():e.points.size()-1;
+        for(qsizetype i=0;i<count;++i) {
+            auto a=e.points[i],b=e.points[(i+1)%e.points.size()];
+            auto arc=geo::bulgeArc(a,b,e.bulges.value(i));
+            auto pts=arc?geo::arcPoints(*arc,0.001):QVector<QPointF>{a,b};
+            auto widths=e.constantWidth>0?qMakePair(e.constantWidth,e.constantWidth):e.widths.value(i);
+            QPainterPath center;center.moveTo(a);for(qsizetype j=1;j<pts.size();++j)center.lineTo(pts[j]);
+            if(widths.first==0&&widths.second==0){filled.addPath(center);continue;}
+            if(widths.first==widths.second) {
+                QPainterPathStroker stroker;stroker.setWidth(widths.first);stroker.setCapStyle(Qt::FlatCap);stroker.setJoinStyle(Qt::MiterJoin);
+                filled.addPath(stroker.createStroke(center));
+            } else {
+                QVector<QPointF> left,right;
+                for(qsizetype j=0;j<pts.size();++j) {
+                    QPointF normal;
+                    if(arc)normal=(pts[j]-arc->center)/arc->radius*(arc->sweep>0?-1:1);
+                    else {auto delta=b-a;double length=geo::length(a,b);normal=length>0?QPointF(-delta.y(),delta.x())/length:QPointF{};}
+                    double half=(widths.first+(widths.second-widths.first)*j/(pts.size()-1))/2;
+                    left.append(pts[j]+normal*half);right.append(pts[j]-normal*half);
+                }
+                QPainterPath strip;strip.moveTo(left.first());for(qsizetype j=1;j<left.size();++j)strip.lineTo(left[j]);
+                for(auto it=right.crbegin();it!=right.crend();++it)strip.lineTo(*it);
+                strip.closeSubpath();filled.addPath(strip);
+            }
+        }
+        return filled;
+    }
     auto points=e.outline(0.01);if(!points.isEmpty()){path.moveTo(points[0]);for(qsizetype i=1;i<points.size();++i)path.lineTo(points[i]);if(e.isClosed())path.closeSubpath();}return path;
 }
 void CadCanvas::synchronize() {
@@ -99,7 +129,7 @@ void CadCanvas::acceptPoint(QPointF p) {
     points_.append(p);qsizetype n=points_.size();std::optional<Entity> result;
     Entity e;
     if(tool_==Tool::Coordinate){emit message("X = "+value(p.x())+" · Y = "+value(p.y())+" "+document->unitName());points_.clear();}
-    else if(tool_==Tool::Text){bool ok=false;e.text=QInputDialog::getMultiLineText(this,"插入文字","文字内容",{},&ok);
+    else if(tool_==Tool::Text){bool ok=false;e.text=QInputDialog::getText(this,"插入文字","单行文字内容",QLineEdit::Normal,{},&ok);
         if(ok&&!e.text.isEmpty()){e.height=QInputDialog::getDouble(this,"文字高度","高度",2.5,0.000001,1e6,4,&ok);if(ok){e.kind=Kind::Text;e.points={p};result=e;}}points_.clear();}
     else if(tool_==Tool::Line&&n==2){if(geo::length(points_[0],points_[1])>geo::epsilon){e.points=points_;result=e;}points_={p};}
     else if(tool_==Tool::Rectangle&&n==2){auto a=points_[0],b=points_[1];if(std::abs(a.x()-b.x())>geo::epsilon&&std::abs(a.y()-b.y())>geo::epsilon){e.kind=Kind::Rectangle;e.closed=true;e.points={a,{b.x(),a.y()},b,{a.x(),b.y()}};result=e;}points_.clear();}
@@ -112,7 +142,7 @@ void CadCanvas::acceptPoint(QPointF p) {
     else if(tool_==Tool::Angle&&n==3){double delta=std::abs(geo::angle(points_[0],points_[1])-geo::angle(points_[0],p));emit message("夹角 = "+value(std::min(delta,360-delta))+"°");points_.clear();}
     else if(tool_==Tool::Dimension&&n==3){if(geo::length(points_[0],points_[1])>geo::epsilon){e.kind=Kind::Dimension;e.points=points_;e.text="<>";result=e;}points_.clear();}
     else if((tool_==Tool::Move||tool_==Tool::Copy||tool_==Tool::Mirror)&&n==2){auto before=document->selected(selection,true),after=before;auto a=points_[0];
-        if(geo::length(a,p)>geo::epsilon){for(auto& item:after){if(tool_!=Tool::Move){item.id=document->allocateId();item.sourceKey.clear();}if(tool_==Tool::Mirror)item.mirror(a,p);else item.translate(p-a);}
+        if(geo::length(a,p)>geo::epsilon){for(auto& item:after){if(tool_!=Tool::Move){item.id=document->allocateId();item.sourceKey.clear();item.sourceAttributes.clear();}if(tool_==Tool::Mirror)item.mirror(a,p);else item.translate(p-a);}
             document->commit(toolName(tool_),tool_==Tool::Move?before:QVector<Entity>{},after);selection.clear();for(const auto& item:after)selection.insert(item.id);synchronize();emit documentChanged();}
         setTool(Tool::Select);
     }
@@ -140,8 +170,8 @@ void CadCanvas::paintEvent(QPaintEvent*) {
     auto visible=index_.query(world);std::sort(visible.begin(),visible.end());
     for(auto id:visible){const auto& cached=cache_[id];const auto& e=cached.entity;auto layer=document->layers.value(e.layer);
         QPen pen(selection.contains(id)?QColor("#f4c66c"):(e.color.isValid()?e.color:layer.color),std::clamp(layer.lineweight*4,1.,3.)+(selection.contains(id)?1:0));pen.setCosmetic(true);p.setPen(pen);
-        p.setBrush(e.kind==Kind::Text?QBrush(pen.color()):QBrush(Qt::NoBrush));p.drawPath(cached.path);}
-    QPen preview(QColor("#56d9bd"),1.4,Qt::DashLine);preview.setCosmetic(true);p.setPen(preview);p.setBrush(Qt::NoBrush);
+        p.setBrush(e.kind==Kind::Text||e.maximumWidth()>0?QBrush(pen.color()):QBrush(Qt::NoBrush));p.drawPath(cached.path);}
+    QPen preview(branding::AppBrand::accent(),1.4,Qt::DashLine);preview.setCosmetic(true);p.setPen(preview);p.setBrush(Qt::NoBrush);
     if(!points_.isEmpty()&&hasCursor_){Entity e;e.points=points_;e.points.append(cursor_);
         if(tool_==Tool::Rectangle){auto a=e.points[0],b=cursor_;p.drawRect(QRectF(a,b).normalized());}
         else if(tool_==Tool::Circle||tool_==Tool::Arc){e.kind=Kind::Circle;e.radius=geo::length(e.points[0],e.points[1]);e.points={e.points[0]};p.drawPath(pathFor(e));}
@@ -149,7 +179,7 @@ void CadCanvas::paintEvent(QPaintEvent*) {
         else if(tool_==Tool::Move||tool_==Tool::Copy||tool_==Tool::Mirror){for(auto ghost:document->selected(selection,true)){if(geo::length(points_[0],cursor_)<geo::epsilon)continue;if(tool_==Tool::Mirror)ghost.mirror(points_[0],cursor_);else ghost.translate(cursor_-points_[0]);p.drawPath(pathFor(ghost));}}
         else {e.kind=Kind::Polyline;p.drawPath(pathFor(e));}}
     p.resetTransform();
-    if(dragging_){QColor color(dragEnd_.x()<dragStart_.x()?"#56d9bd":"#7ea7ff");p.setPen(QPen(color,1,dragEnd_.x()<dragStart_.x()?Qt::DashLine:Qt::SolidLine));color.setAlpha(35);p.setBrush(color);p.drawRect(QRectF(dragStart_,dragEnd_).normalized());}
+    if(dragging_){QColor color(dragEnd_.x()<dragStart_.x()?branding::AppBrand::accent():QColor("#7ea7ff"));p.setPen(QPen(color,1,dragEnd_.x()<dragStart_.x()?Qt::DashLine:Qt::SolidLine));color.setAlpha(35);p.setBrush(color);p.drawRect(QRectF(dragStart_,dragEnd_).normalized());}
     if(snapPoint_){auto pos=screenAt(snapPoint_->first);p.setPen(QPen(QColor("#ffce73"),1.5));p.setBrush(Qt::NoBrush);p.drawRect(QRectF(pos-QPointF(5,5),QSizeF(10,10)));p.drawText(pos+QPointF(12,-10),snapPoint_->second);}
     if(hasCursor_&&tool_!=Tool::Select){auto pos=screenAt(cursor_);p.setPen(QColor("#8cacc2"));p.drawLine(pos-QPointF(15,0),pos+QPointF(15,0));p.drawLine(pos-QPointF(0,15),pos+QPointF(0,15));
         if(!points_.isEmpty())p.drawText(pos+QPointF(18,22),value(geo::length(points_.last(),cursor_),3)+" / "+value(geo::angle(points_.last(),cursor_),1)+"°");}
@@ -192,7 +222,7 @@ void CadCanvas::keyPressEvent(QKeyEvent* e) {
 void CadCanvas::renderDocument(QPainter& painter,QRectF target,bool dark) {
     auto box=document->bounds();double s=std::min(target.width()/std::max(box.width()+4,1.),target.height()/std::max(box.height()+4,1.));
     painter.save();if(dark)painter.fillRect(target,QColor("#101922"));painter.translate(target.center());painter.scale(s,-s);painter.translate(-box.center());painter.setRenderHint(QPainter::Antialiasing);
-    for(const auto& e:document->entities)if(document->layers.value(e.layer).visible){QPen pen(dark?(e.color.isValid()?e.color:document->layers.value(e.layer).color):QColor("#172633"),0);pen.setCosmetic(true);painter.setPen(pen);painter.setBrush(e.kind==Kind::Text?QBrush(pen.color()):QBrush(Qt::NoBrush));painter.drawPath(cache_.value(e.id).path);}
+    for(const auto& e:document->entities)if(document->layers.value(e.layer).visible){QPen pen(dark?(e.color.isValid()?e.color:document->layers.value(e.layer).color):QColor("#172633"),0);pen.setCosmetic(true);painter.setPen(pen);painter.setBrush(e.kind==Kind::Text||e.maximumWidth()>0?QBrush(pen.color()):QBrush(Qt::NoBrush));painter.drawPath(cache_.value(e.id).path);}
     painter.restore();
 }
 }

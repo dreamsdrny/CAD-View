@@ -64,7 +64,7 @@ Document Document::demo() {
     for(double x:{5.,75.})for(double y:{5.,45.}) {Entity e;e.kind=Kind::Circle;e.layer="DRILL";e.points={{x,y}};e.radius=1.6;d.load(e);}
     for(double x=24;x<=56;x+=4)for(double y:{15.,35.}) {Entity e;e.kind=Kind::Rectangle;e.layer="PAD";e.closed=true;e.points={{x-1,y-1.5},{x+1,y-1.5},{x+1,y+1.5},{x-1,y+1.5}};d.load(e);}
     Entity silk;silk.kind=Kind::Rectangle;silk.layer="SILK";silk.closed=true;silk.points={{22,18},{58,18},{58,32},{22,32}};d.load(silk);
-    Entity text;text.kind=Kind::Text;text.layer="SILK";text.points={{26,23}};text.text="CAD WORKBENCH";text.height=2.2;d.load(text);
+    Entity text;text.kind=Kind::Text;text.layer="SILK";text.points={{29,23}};text.text="Qiao CAD";text.height=2.2;d.load(text);
     Entity dim;dim.kind=Kind::Dimension;dim.points={{0,0},{80,0},{40,-8}};dim.text="<>";d.load(dim);
     d.markSaved();return d;
 }
