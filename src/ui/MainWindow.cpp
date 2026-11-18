@@ -68,7 +68,7 @@ void MainWindow::buildUi() {
     file->addAction(action("设置单位",[this]{QStringList names{"图形单位","inch","mm","cm","m","mil","µm"};QVector<int> codes{0,1,4,5,6,9,13};bool ok=false;
         auto name=QInputDialog::getItem(this,"设置单位","仅声明单位，不缩放坐标",names,std::max(0,int(codes.indexOf(canvas()->document->units))),false,&ok);
         if(ok){canvas()->document->setUnits(codes[names.indexOf(name)]);results_->clear();refresh();}}));
-    file->addAction(action("配置 DWG 转换器",[this]{auto p=QFileDialog::getOpenFileName(this,"选择 ODAFileConverter.exe",{},"程序 (*.exe)");if(!p.isEmpty())settings_.setValue("converter",p);}));
+    file->addAction(action("配置 DWG 转换器",[this]{auto p=QFileDialog::getOpenFileName(this,"选择 ODAFileConverter.exe",io::DwgAdapter::findConverter(settings_.value("converter").toString()),"ODA 转换器 (ODAFileConverter.exe)");if(!p.isEmpty()){settings_.setValue("converter",p);log("已配置 DWG 转换器："+p);}}));
     file->addAction(action("打开演示板",[this]{addDocument(Document::demo());}));file->addSeparator();file->addAction(action("退出",[this]{close();},"Alt+F4"));
     auto* edit=menuBar()->addMenu("编辑");
     undo_=action("撤销",[this]{canvas()->setTool(Tool::Select);if(canvas()->document->undo()){results_->clear();canvas()->synchronize();refresh();}},"Ctrl+Z");
@@ -149,7 +149,7 @@ void MainWindow::openPath(QString path) {
     beginJob(nullptr,"后台读取："+path);auto converter=settings_.value("converter").toString();auto* watcher=new QFutureWatcher<OpenResult>(this);
     auto cancelled=std::make_shared<std::atomic_bool>(false);auto* progress=new QProgressDialog("正在读取图纸…","取消",0,0,this);progress->setWindowModality(Qt::NonModal);progress->setMinimumDuration(0);progress->setAutoClose(false);
     connect(progress,&QProgressDialog::canceled,this,[cancelled]{cancelled->store(true);});progress->show();
-    connect(watcher,&QFutureWatcher<OpenResult>::finished,this,[this,watcher,progress,cancelled]{auto result=watcher->result();progress->deleteLater();endJob(nullptr);if(cancelled->load())log("图纸读取已取消。");else if(!result.error.isEmpty())error(result.error);else{addDocument(std::move(result.document));for(auto warning:canvas()->document->warnings)log(warning);log("图纸已载入。");}watcher->deleteLater();});
+    connect(watcher,&QFutureWatcher<OpenResult>::finished,this,[this,watcher,progress,cancelled]{auto result=watcher->result();progress->deleteLater();endJob(nullptr);if(cancelled->load()){log("图纸读取已取消。");emit fileOpenFailed("图纸读取已取消。");}else if(!result.error.isEmpty()){log(result.error);emit fileOpenFailed(result.error);if(!property("checkOpen").toBool())QMessageBox::warning(this,"操作未完成",result.error);}else{addDocument(std::move(result.document));for(auto warning:canvas()->document->warnings)log(warning);log("图纸已载入："+canvas()->document->path);emit fileOpened(canvas()->document->path);}watcher->deleteLater();});
     watcher->setFuture(QtConcurrent::run([path,converter,cancelled]{OpenResult r;try{io::DxfReadOptions options;options.cancelled=[cancelled]{return cancelled->load();};r.document=io::DwgAdapter::open(path,converter,options);}catch(const std::exception& e){r.error=exceptionText(e);}return r;}));
 }
 void MainWindow::saveFile(bool saveAs,std::function<void(bool)> completion) {

@@ -16,6 +16,9 @@ public:
     void addDocument(Document document);
     void openPath(QString path);
     void executeCommand(QString text);
+signals:
+    void fileOpened(QString path);
+    void fileOpenFailed(QString message);
 protected:
     void closeEvent(QCloseEvent*) override;
 private:

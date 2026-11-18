@@ -1,4 +1,8 @@
+add_executable(fake_oda_converter FakeOdaConverter.cpp)
+target_link_libraries(fake_oda_converter PRIVATE Qt6::Core)
+
 add_executable(cad_core_tests CoreTests.cpp)
+add_dependencies(cad_core_tests fake_oda_converter)
 target_link_libraries(cad_core_tests PRIVATE cad_core cad_io cad_engineering Qt6::Test)
 add_test(NAME core COMMAND cad_core_tests)
 

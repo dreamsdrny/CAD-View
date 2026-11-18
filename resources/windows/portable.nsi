@@ -47,5 +47,6 @@ Section "CAD Portable"
     File /r "${INPUT_DIR}\*.*"
 launch:
     ; Forward drag-and-drop or command-line file paths to the real application.
-    Exec '"$INSTDIR\CAD.exe" $Parameters'
+    ExecWait '"$INSTDIR\CAD.exe" $Parameters' $0
+    SetErrorLevel $0
 SectionEnd

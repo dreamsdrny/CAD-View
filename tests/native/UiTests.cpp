@@ -12,6 +12,8 @@
 #include <QAction>
 #include "branding/AppBrand.h"
 #include "GenesisFixture.h"
+#include "ConverterFixture.h"
+#include <QTextEdit>
 
 using namespace cad;
 using namespace cad::ui;
@@ -47,6 +49,37 @@ private slots:
         QTemporaryDir temp;QString path=temp.filePath("demo.dxf");io::DxfAdapter::write(Document::demo(),path);
         MainWindow w(false);w.openPath(path);QTRY_COMPARE_WITH_TIMEOUT(w.canvas()->document->entities.size(),26,5000);QCOMPARE(w.canvas()->document->path,path);
         w.canvas()->document->markSaved();
+    }
+    void asyncDwgCompanion() {
+        ConverterEnvironment environment;QTemporaryDir temp;
+        auto dwg=temp.filePath("中文图纸[版本02.dwg"),dxf=temp.filePath("中文图纸[版本02.dxf");
+        QFile source(dwg);QVERIFY(source.open(QIODevice::WriteOnly));source.write("DWG placeholder");source.close();
+        io::DxfAdapter::write(Document::demo(),dxf);
+        MainWindow w(false);QSignalSpy opened(&w,&MainWindow::fileOpened);w.openPath(dwg);
+        QTRY_COMPARE_WITH_TIMEOUT(opened.count(),1,5000);
+        QCOMPARE(w.canvas()->document->path,dxf);QCOMPARE(w.canvas()->document->entities.size(),26);
+        QVERIFY(w.windowTitle().contains("DXF 副本"));
+        QVERIFY(w.findChild<QTextEdit*>()->toPlainText().contains("不会覆盖原 DWG"));
+        w.canvas()->document->markSaved();
+    }
+    void checkedOpenFailure() {
+        MainWindow w(false);w.setProperty("checkOpen",true);QSignalSpy failed(&w,&MainWindow::fileOpenFailed);
+        QTemporaryDir temp;w.openPath(temp.filePath("missing.dxf"));
+        QTRY_COMPARE_WITH_TIMEOUT(failed.count(),1,5000);QVERIFY(!failed.first().first().toString().isEmpty());
+        QVERIFY(w.canvas()->document->entities.isEmpty());
+    }
+    void localDwgPanel() {
+        auto path=qEnvironmentVariable("CAD_TEST_DWG");if(path.isEmpty())QSKIP("Set CAD_TEST_DWG to verify a local production DWG or companion.");
+        MainWindow window(false);window.setProperty("checkOpen",true);window.resize(1400,900);window.show();
+        QSignalSpy opened(&window,&MainWindow::fileOpened),failed(&window,&MainWindow::fileOpenFailed);window.openPath(path);
+        QTRY_VERIFY_WITH_TIMEOUT(opened.count()+failed.count()>0,30000);
+        QVERIFY2(failed.isEmpty(),failed.isEmpty()?"":qPrintable(failed.first().first().toString()));
+        auto d=window.canvas()->document;QVERIFY(!d->entities.isEmpty());
+        window.canvas()->fitDrawing();QTest::qWait(200);
+        auto screenshot=qEnvironmentVariable("CAD_TEST_SCREENSHOT");if(!screenshot.isEmpty())QVERIFY(window.grab().save(screenshot));
+        qInfo()<<"Production drawing:"<<d->path<<d->entities.size()<<"entities, bounds"<<d->bounds();
+        for(const auto& warning:d->warnings)qInfo().noquote()<<warning;
+        d->markSaved();
     }
     void genesisPadsRender() {
         auto document=std::make_shared<Document>(io::DxfAdapter::parse(genesisFixture()));

@@ -30,12 +30,12 @@
 双击 **`package.bat`**，自动执行编译、测试、Qt 运行库部署、便携包、单文件 EXE 和安装 EXE 生成：
 
 ```text
-dist/CAD-0.2.1.exe                单文件便携 EXE，双击运行，无需安装
-dist/CAD-0.2.1-Setup.exe          单文件安装包，安装 CAD 并创建桌面/开始菜单快捷方式
-dist/CAD-0.2.1-Windows-x64.zip    便携包，完整解压后运行 CAD/CAD.exe
+dist/CAD-0.2.2.exe                单文件便携 EXE，双击运行，无需安装
+dist/CAD-0.2.2-Setup.exe          单文件安装包，安装 CAD 并创建桌面/开始菜单快捷方式
+dist/CAD-0.2.2-Windows-x64.zip    便携包，完整解压后运行 CAD/CAD.exe
 ```
 
-单文件 EXE 是自解压便携启动器，不写卸载记录、不建快捷方式；首次运行会把运行库解压到 `%LOCALAPPDATA%\Qiao\CAD-Portable\0.2.1`，之后直接复用。
+单文件 EXE 是自解压便携启动器，不写卸载记录、不建快捷方式；首次运行会把运行库解压到 `%LOCALAPPDATA%\Qiao\CAD-Portable\0.2.2`，之后直接复用。版本升级使用独立目录，不复用 0.2.1 的旧程序。
 
 安装包包含全部必要 DLL，不要求目标机器安装 Python 或 Qt SDK。默认安装到当前用户 `%LOCALAPPDATA%\Programs\Qiao\CAD`，可在安装界面更改路径。从源码制作安装程序的完整步骤见 [如何将代码打包成安装程序](docs/如何将代码打包成安装程序.md) 和 [详细打包教程](docs/PACKAGING_TUTORIAL.md)。
 
@@ -149,7 +149,8 @@ LINE
 - 编辑源对象尽量保留句柄、线型、扩展数据；复制/分解产生的新对象主要继承几何、图层与颜色，非完整源属性复制。
 - 新文字限定为单行 TEXT；含换行的文字不能保存，避免破坏 DXF 记录。中文文字/图层使用 DXF Unicode 转义；显示使用系统字体，未实现 SHX 等价渲染。
 - DXF 保存使用 `QSaveFile` 原子提交；后台保存过程中继续编辑时，不会将未写入的更改标为已保存。
-- DWG 需要独立安装 [ODA File Converter](https://www.opendesign.com/guestfiles/oda_file_converter)，在“文件 → 配置 DWG 转换器”指定程序。DWG 打开/保存均在后台通过转换器执行，输出 ACAD2018。当前尚无随仓库提供的真实 DWG 样本或转换器，多版本兼容性需使用下述脚本在目标环境验证。
+- 真正的 DWG 读取/保存需要独立安装 [ODA File Converter](https://www.opendesign.com/guestfiles/oda_file_converter)。程序自动查找已配置路径、`CAD_ODA_CONVERTER` 环境变量、程序同目录/`oda`/`tools/oda`、PATH 和 Program Files 中的常见 ODA 安装目录；也可在“文件 → 配置 DWG 转换器”指定程序。转换在后台执行，输出 ACAD2018；临时文件使用固定英文名，避免中文及 `[` 等字符影响 ODA 的文件筛选。
+- 未找到转换器时，若 DWG 所在目录有同名 ASCII DXF，自动打开 **DXF 副本**，标题与命令区明确提示。此时文档保存路径为 DXF，不会覆盖原 DWG；无法保证 DXF 与 DWG 内容一致。转换器执行失败时不静默回退。没有同名 DXF 时仍需安装转换器，保存 DWG 始终需要转换器。转换器不随本软件打包。
 - DXF 默认限制 256 MiB、200 万条记录、400 万组码、单个多段线 100 万个顶点、块展开 200 万对象及 32 层嵌套；后台打开时可取消，开发接口可调整限制。
 
 ## 构建与测试
@@ -199,6 +200,14 @@ windeployqt --release --compiler-runtime build/native/bin/CAD.exe
 ```
 
 该脚本不验证所有块、布局、文字和扩展属性的完整性；这些仍需配合专业 CAD 阅读器和样本矩阵检查。
+
+检查实际界面后台打开流程并输出 JSON 报告和截图（失败返回非零退出码）：
+
+```powershell
+.\build\native\bin\CAD.exe --check-open "D:\图纸\board.dwg" "D:\检查\open.json" "D:\检查\open.png"
+```
+
+报告包含实际载入路径、对象/图层数、边界与兼容性警告。测试转换器桩仅验证进程参数与安全保存，不等价于真实 ODA/DWG 兼容验证。
 
 ## 性能与下一步
 

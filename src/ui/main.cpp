@@ -5,6 +5,10 @@
 #include "io/DwgAdapter.h"
 #include "branding/AppBrand.h"
 #include <QTextStream>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QSaveFile>
 
 int main(int argc,char** argv) {
     QApplication app(argc,argv);cad::branding::AppBrand::apply(app);
@@ -31,6 +35,31 @@ int main(int argc,char** argv) {
         }catch(const std::exception& e){QTextStream(stderr)<<"DWG roundtrip failed: "<<QString::fromUtf8(e.what())<<Qt::endl;return 1;}
     }
     cad::ui::MainWindow window;window.show();
+    if((arguments.size()==4||arguments.size()==5)&&arguments[1]=="--check-open") {
+        window.setProperty("checkOpen",true);
+        bool finished=false;
+        auto report=[&](QString error) {
+            if(finished)return;
+            finished=true;
+            const auto& d=*window.canvas()->document;auto bounds=d.bounds();
+            QJsonObject result{{"success",error.isEmpty()},{"requestedPath",arguments[2]},{"loadedPath",d.path},
+                {"title",d.title},{"entities",int(d.entities.size())},{"layers",int(d.layers.size())},
+                {"warnings",QJsonArray::fromStringList(d.warnings)},{"error",error},
+                {"bounds",QJsonArray{bounds.x(),bounds.y(),bounds.width(),bounds.height()}}};
+            if(error.isEmpty()&&arguments.size()==5) {
+                window.canvas()->fitDrawing();
+                if(!window.grab().save(arguments[4])){error="无法保存检查截图。";result["success"]=false;result["error"]=error;}
+            }
+            QSaveFile file(arguments[3]);auto bytes=QJsonDocument(result).toJson();
+            bool saved=file.open(QIODevice::WriteOnly)&&file.write(bytes)==bytes.size()&&file.commit();
+            app.exit(error.isEmpty()&&saved?0:1);
+        };
+        QObject::connect(&window,&cad::ui::MainWindow::fileOpened,&app,[&](QString){QTimer::singleShot(200,&app,[&]{report({});});});
+        QObject::connect(&window,&cad::ui::MainWindow::fileOpenFailed,&app,[&](QString error){report(error);});
+        QTimer::singleShot(150000,&app,[&]{report("打开检查超时。");});
+        window.openPath(arguments[2]);
+        return app.exec();
+    }
     if(arguments.size()==3&&arguments[1]=="--screenshot")QTimer::singleShot(300,&app,[&]{window.grab().save(arguments[2]);app.quit();});
     else if(arguments.contains("--smoke-test"))QTimer::singleShot(800,&app,&QApplication::quit);
     else if(arguments.size()>1)window.openPath(arguments[1]);

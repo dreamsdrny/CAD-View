@@ -9,6 +9,8 @@
 #include <QFile>
 #include <cmath>
 #include "GenesisFixture.h"
+#include "ConverterFixture.h"
+#include <QDir>
 
 using namespace cad;
 class CoreTests : public QObject {
@@ -151,9 +153,59 @@ private slots:
         geo::arcPoints({{0,0},1000000,0,360},0.005,&status);QVERIFY(status.budgetExceeded);QVERIFY(status.maxError>0.07);
     }
     void dwgFailureMessages() {
+        ConverterEnvironment environment;
         QTemporaryDir temp;QFile input(temp.filePath("invalid.dwg"));QVERIFY(input.open(QIODevice::WriteOnly));input.write("not a DWG");input.close();
         try {io::DwgAdapter::open(input.fileName(),temp.filePath("missing-converter.exe"));QFAIL("missing converter should fail");}
         catch(const std::runtime_error& e){QVERIFY(QString::fromUtf8(e.what()).contains("ODA"));}
+    }
+    void converterDiscovery() {
+        ConverterEnvironment environment;QTemporaryDir temp;
+        auto stub=QCoreApplication::applicationDirPath()+"/fake_oda_converter.exe";
+        auto configured=temp.filePath("configured.exe");QVERIFY(QFile::copy(stub,configured));
+        QCOMPARE(io::DwgAdapter::findConverter(configured),configured);
+        qputenv("CAD_ODA_CONVERTER",configured.toUtf8());
+        QCOMPARE(io::DwgAdapter::findConverter(temp.filePath("missing.exe")),configured);
+        qputenv("CAD_ODA_CONVERTER","");
+        auto installed=temp.filePath("ODA/ODAFileConverter 26.0/ODAFileConverter.exe");
+        QVERIFY(QDir().mkpath(QFileInfo(installed).absolutePath()));QVERIFY(QFile::copy(stub,installed));
+        qputenv("ProgramFiles",temp.path().toUtf8());
+        QCOMPARE(io::DwgAdapter::findConverter(temp.path()),installed);
+        qputenv("ProgramFiles","");qputenv("PATH",QFileInfo(installed).absolutePath().toUtf8());
+        QCOMPARE(io::DwgAdapter::findConverter(),installed);
+    }
+    void companionDxfSafety() {
+        ConverterEnvironment environment;QTemporaryDir temp;
+        auto dwg=temp.filePath("中文图纸[版本02.dwg"),dxf=temp.filePath("中文图纸[版本02.DXF");
+        QFile source(dwg);QVERIFY(source.open(QIODevice::WriteOnly));source.write("original DWG bytes");source.close();
+        io::DxfAdapter::write(Document::demo(),dxf);
+        QCOMPARE(io::DwgAdapter::companionDxf(dwg),dxf);
+        auto d=io::DwgAdapter::open(dwg,{});QCOMPARE(d.entities.size(),26);QCOMPARE(d.path,dxf);
+        QVERIFY(d.title.contains("DXF 副本"));QVERIFY(d.warnings.first().contains("不会覆盖原 DWG"));
+        QVERIFY_EXCEPTION_THROWN(io::DwgAdapter::save(d,dwg,{}),std::runtime_error);
+        QVERIFY(source.open(QIODevice::ReadOnly));QCOMPARE(source.readAll(),QByteArray("original DWG bytes"));source.close();
+        io::DxfReadOptions options;options.cancelled=[] {return true;};
+        QVERIFY_EXCEPTION_THROWN(io::DwgAdapter::open(dwg,{},options),std::runtime_error);
+        options={};options.maxBytes=1;QVERIFY_EXCEPTION_THROWN(io::DwgAdapter::open(dwg,{},options),std::runtime_error);
+        QVERIFY(QFile::remove(dwg));QVERIFY(io::DwgAdapter::companionDxf(dwg).isEmpty());
+        QVERIFY_EXCEPTION_THROWN(io::DwgAdapter::open(dwg,{}),std::runtime_error);
+    }
+    void converterSafeFilenameAndFailures() {
+        auto stub=QCoreApplication::applicationDirPath()+"/fake_oda_converter.exe";QTemporaryDir temp;
+        auto input=temp.filePath("中文图纸[版本02.dwg"),output=temp.filePath("roundtrip.dwg");
+        // DXF bytes stand in for DWG only in the contract stub.
+        io::DxfAdapter::write(Document::demo(),input);
+        auto d=io::DwgAdapter::open(input,stub);QCOMPARE(d.entities.size(),26);QCOMPARE(d.path,input);
+        QVERIFY(!d.title.contains("副本"));io::DwgAdapter::save(d,output,stub);
+        QCOMPARE(io::DwgAdapter::open(output,stub).entities.size(),26);
+        QFile source(input);QVERIFY(source.open(QIODevice::WriteOnly));source.write("FAIL");source.close();
+        io::DxfAdapter::write(Document::demo(),temp.filePath("中文图纸[版本02.dxf"));
+        try {io::DwgAdapter::open(input,stub);QFAIL("converter failure must not silently open companion");}
+        catch(const std::runtime_error& e){QVERIFY(QString::fromUtf8(e.what()).contains("17"));}
+        QVERIFY(source.open(QIODevice::WriteOnly));source.write("EMPTY");source.close();
+        auto protectedOutput=temp.filePath("protected.dxf");QFile protectedFile(protectedOutput);
+        QVERIFY(protectedFile.open(QIODevice::WriteOnly));protectedFile.write("keep");protectedFile.close();
+        QVERIFY_EXCEPTION_THROWN(io::DwgAdapter::convert(input,protectedOutput,stub),std::runtime_error);
+        QVERIFY(protectedFile.open(QIODevice::ReadOnly));QCOMPARE(protectedFile.readAll(),QByteArray("keep"));
     }
     void largeDocument() {
         QElapsedTimer timer;timer.start();Document d;
