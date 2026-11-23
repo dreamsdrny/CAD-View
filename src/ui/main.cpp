@@ -65,5 +65,6 @@ int main(int argc,char** argv) {
     if(arguments.size()==3&&arguments[1]=="--screenshot")QTimer::singleShot(300,&app,[&]{window.grab().save(arguments[2]);app.quit();});
     else if(arguments.contains("--smoke-test"))QTimer::singleShot(800,&app,&QApplication::quit);
     else if(arguments.size()>1)window.openPath(arguments[1]);
+    if(!arguments.contains("--smoke-test")&&!arguments.contains("--screenshot"))window.showStartupTutorial(true);
     return app.exec();
 }

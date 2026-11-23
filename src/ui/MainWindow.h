@@ -17,6 +17,7 @@ public:
     void addDocument(Document document);
     void openPath(QString path);
     void executeCommand(QString text);
+    void showStartupTutorial(bool startup=false);
 signals:
     void fileOpened(QString path);
     void fileOpenFailed(QString message);

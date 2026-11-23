@@ -392,7 +392,8 @@ Tags dimensionBlock(const Entity& e,QString name,int units) {
     line(a,aa);line(b,bb);line(aa,bb);
     double len=geo::length(a,b),size=std::min(1.,len/10);if(len>geo::epsilon){auto u=(b-a)/len;for(auto p:{aa,bb}){double sign=p==aa?1:-1;
         for(double side:{-1.,1.})line(p,p+u*(sign*size)+QPointF(-u.y(),u.x())*(side*size/3));}}
-    Entity label;label.kind=Kind::Text;label.layer=e.layer;label.points={(aa+bb)/2+QPointF(0,0.8)};label.height=2;label.text=e.text;label.text.replace("<>",Document::dualLengthInUnits(len,units));t+=fresh(label);
+    double h=e.height>geo::epsilon?e.height:std::clamp(len*0.1,0.3,3.0);
+    Entity label;label.kind=Kind::Text;label.layer=e.layer;label.points={(aa+bb)/2+QPointF(0,h*0.4)};label.height=h;label.text=e.text;label.text.replace("<>",Document::dualLengthInUnits(len,units));t+=fresh(label);
     t+={tag(0,"ENDBLK"),tag(100,"AcDbEntity"),tag(8,e.layer),tag(100,"AcDbBlockEnd")};return t;
 }
 Tags newLayer(const Layer& l) {return {tag(0,"LAYER"),tag(100,"AcDbSymbolTableRecord"),tag(100,"AcDbLayerTableRecord"),tag(2,l.name),tag(70,l.locked?4.:0.),tag(62,l.visible?7.:-7.),tag(6,"CONTINUOUS"),tag(420,double(l.color.rgb()&0xffffff)),tag(370,std::round(l.lineweight*100))};}

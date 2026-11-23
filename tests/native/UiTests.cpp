@@ -18,6 +18,10 @@
 #include <QTextEdit>
 #include <QDockWidget>
 #include <QLineEdit>
+#include <QDialog>
+#include <QTextBrowser>
+#include <QCheckBox>
+#include <QSettings>
 
 using namespace cad;
 using namespace cad::ui;
@@ -88,9 +92,10 @@ private slots:
         QCOMPARE(document->entities.size(),3);
         for(const auto& e:document->entities) if(e.kind==Kind::Dimension) {
             QCOMPARE(e.text,QString("<>"));
+            QVERIFY(e.height>0&&e.height<2.);   // adaptive height, smaller than the old fixed 2
             auto dual=CadCanvas::pathFor(e,document.get()).boundingRect();
             auto plain=CadCanvas::pathFor(e).boundingRect();
-            QVERIFY(dual.width()>plain.width()+8.);
+            QVERIFY(dual.width()>plain.width()+4.);
         }
     }
     void measurePanelRecordsAndLocates() {
@@ -107,6 +112,35 @@ private slots:
         QVERIFY(panel->item(0)->text().contains("mm"));
         QTest::mouseClick(panel->viewport(),Qt::LeftButton,Qt::NoModifier,panel->visualItemRect(panel->item(0)).center());
         QVERIFY(!c->selection.isEmpty());
+    }
+    void startupTutorialShowsAndPersists() {
+        QSettings settings("EngineeringTools","CADWorkbenchNative");const QString key="ui/showStartupTutorial";
+        auto saved=settings.value(key);
+        settings.setValue(key,true);settings.sync();
+        bool found=false,contentOk=false,shown=false;
+        {
+            MainWindow window(false);window.show();QTest::qWait(30);
+            QTimer closer;int tries=0;
+            QObject::connect(&closer,&QTimer::timeout,[&]{
+                auto* d=qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                if(d&&d->windowTitle().contains("操作教程")){
+                    found=true;
+                    if(auto* browser=d->findChild<QTextBrowser*>())contentOk=browser->toHtml().contains("对象间距")&&browser->toHtml().contains("mil");
+                    if(auto* cb=d->findChild<QCheckBox*>())cb->setChecked(false);
+                    d->accept();closer.stop();
+                } else if(++tries>400)closer.stop();
+            });
+            closer.start(5);
+            window.showStartupTutorial(true);
+            QVERIFY(found);QVERIFY(contentOk);
+            QTimer probe;int probes=0;
+            QObject::connect(&probe,&QTimer::timeout,[&]{if(QApplication::activeModalWidget())shown=true;if(++probes>20)probe.stop();});
+            probe.start(5);
+            window.showStartupTutorial(true);QTest::qWait(120);
+            QVERIFY(!shown);   // persisted off -> suppressed at startup
+        }
+        if(saved.isValid())settings.setValue(key,saved);else settings.remove(key);
+        settings.sync();
     }
     void gapOnDemoBoardSurvivesDxfRoundtrip() {
         auto document=std::make_shared<Document>(Document::demo());

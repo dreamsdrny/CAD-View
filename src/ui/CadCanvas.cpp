@@ -44,7 +44,8 @@ QPainterPath CadCanvas::pathFor(const Entity& e, const Document* document) {
         auto line=[&](QPointF p,QPointF q){path.moveTo(p);path.lineTo(q);};line(a,aa);line(b,bb);line(aa,bb);
         double len=geo::length(a,b);if(len>geo::epsilon){auto u=(b-a)/len;double size=std::min(1.,len/10);
             for(auto p:{aa,bb})for(double side:{-1.,1.})line(p,p+u*((p==aa?1:-1)*size)+QPointF(-u.y(),u.x())*(side*size/3));}
-        Entity label;label.kind=Kind::Text;label.points={(aa+bb)/2+QPointF(0,0.8)};label.text=e.text;label.text.replace("<>",document?document->dualLength(len):value(len,3));label.height=2;path.addPath(pathFor(label));return path;
+        double h=e.height>geo::epsilon?e.height:std::clamp(len*0.1,0.3,3.0);
+        Entity label;label.kind=Kind::Text;label.points={(aa+bb)/2+QPointF(0,h*0.4)};label.text=e.text;label.text.replace("<>",document?document->dualLength(len):value(len,3));label.height=h;path.addPath(pathFor(label));return path;
     }
     if(e.kind==Kind::Circle){path.addEllipse(e.points[0],e.radius,e.radius);return path;}
     if(e.maximumWidth()>0) {
@@ -93,6 +94,8 @@ void CadCanvas::synchronize() {
 }
 const QPainterPath& CadCanvas::cachedPath(EntityId id) {
     auto it=cache_.find(id);Q_ASSERT(it!=cache_.end());
+    // Dimensions re-render every paint so the mm/mil label always matches current units.
+    if(it->entity.kind==Kind::Dimension){it->path=pathFor(it->entity,document.get());return it->path;}
     if(!it->pathReady){it->path=pathFor(it->entity,document.get());it->pathReady=true;}
     return it->path;
 }
@@ -194,8 +197,9 @@ void CadCanvas::pickForGap(QPointF position) {
         Entity dimension;dimension.kind=Kind::Dimension;
         auto a=result->a,b=result->b;
         double span=geo::length(a,b);
+        dimension.height=std::clamp(span*0.1,0.3,3.0);
         auto normal=span>geo::epsilon?QPointF(-(b-a).y(),(b-a).x())/span:QPointF(0,1);
-        dimension.points={a,b,(a+b)/2+normal*std::max(2.,span*0.35)};
+        dimension.points={a,b,(a+b)/2+normal*std::max(dimension.height*2.,span*0.35)};
         dimension.text="<>";
         dimensionId=add(dimension);
         if(!dimensionId)text+=" · 标注未创建（当前图层锁定或隐藏）";
@@ -209,7 +213,7 @@ void CadCanvas::acceptPoint(QPointF p) {
     if(!geo::finite(p)){emit message("坐标必须为有限数值。");return;}
     points_.append(p);qsizetype n=points_.size();std::optional<Entity> result;
     Entity e;
-    if(tool_==Tool::Coordinate){emit message("X = "+value(p.x())+" · Y = "+value(p.y())+" "+document->unitName());points_.clear();}
+    if(tool_==Tool::Coordinate){QPointF r=p-origin_;emit message("X = "+document->dualLength(r.x())+" · Y = "+document->dualLength(r.y()));points_.clear();}
     else if(tool_==Tool::Text){bool ok=false;e.text=QInputDialog::getText(this,"插入文字","单行文字内容",QLineEdit::Normal,{},&ok);
         if(ok&&!e.text.isEmpty()){e.height=QInputDialog::getDouble(this,"文字高度","高度",2.5,0.000001,1e6,4,&ok);if(ok){e.kind=Kind::Text;e.points={p};result=e;}}points_.clear();}
     else if(tool_==Tool::Line&&n==2){if(geo::length(points_[0],points_[1])>geo::epsilon){e.points=points_;result=e;}points_={p};}
@@ -223,7 +227,7 @@ void CadCanvas::acceptPoint(QPointF p) {
         emit measured(text,{});points_.clear();}
     else if(tool_==Tool::Continuous&&n>1)emit message("本段 "+document->dualLength(geo::length(points_[n-2],p))+" · 累计 "+document->dualLength(geo::polyLength(points_))+" "+document->unitName());
     else if(tool_==Tool::Angle&&n==3){double delta=std::abs(geo::angle(points_[0],points_[1])-geo::angle(points_[0],p));emit message("夹角 = "+value(std::min(delta,360-delta))+"°");points_.clear();}
-    else if(tool_==Tool::Dimension&&n==3){if(geo::length(points_[0],points_[1])>geo::epsilon){e.kind=Kind::Dimension;e.points=points_;e.text="<>";result=e;}points_.clear();}
+    else if(tool_==Tool::Dimension&&n==3){if(geo::length(points_[0],points_[1])>geo::epsilon){e.kind=Kind::Dimension;e.points=points_;e.text="<>";e.height=std::clamp(geo::length(points_[0],points_[1])*0.1,0.3,3.0);result=e;}points_.clear();}
     else if((tool_==Tool::Move||tool_==Tool::Copy||tool_==Tool::Mirror)&&n==2){auto before=document->selected(selection,true),after=before;auto a=points_[0];
         if(geo::length(a,p)>geo::epsilon){for(auto& item:after){if(tool_!=Tool::Move){item.id=document->allocateId();item.sourceKey.clear();item.sourceAttributes.clear();}if(tool_==Tool::Mirror)item.mirror(a,p);else item.translate(p-a);}
             document->commit(toolName(tool_),tool_==Tool::Move?before:QVector<Entity>{},after);selection.clear();for(const auto& item:after)selection.insert(item.id);synchronize();emit documentChanged();}

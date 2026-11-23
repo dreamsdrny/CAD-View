@@ -17,6 +17,8 @@ public:
     Tool tool() const {return tool_;}
     const QVector<QPointF>& inputPoints() const {return points_;}
     QPointF cursorPoint() const {return cursor_;}
+    QPointF coordinateOrigin() const {return origin_;}
+    void setCoordinateOrigin(QPointF o){origin_=o;emit coordinates(cursor_);}
     QPointF modelAt(QPointF screen) const;
     QPointF screenAt(QPointF model) const;
     void synchronize();
@@ -57,6 +59,7 @@ private:
     Tool tool_=Tool::Select;
     QVector<QPointF> points_;
     QPointF center_{},cursor_{};
+    QPointF origin_{};
     double scale_=8;
     bool panning_=false,dragging_=false,hasCursor_=false;
     QPointF lastPan_,dragStart_,dragEnd_;

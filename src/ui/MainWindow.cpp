@@ -36,6 +36,9 @@
 #include <QProgressDialog>
 #include <QPdfWriter>
 #include <QPainter>
+#include <QDialog>
+#include <QTextBrowser>
+#include <QCheckBox>
 #include <cmath>
 #include <stdexcept>
 #include <QRegularExpression>
@@ -83,12 +86,14 @@ void MainWindow::buildUi() {
     edit->addAction(action("编辑 / 批量属性",[this]{editProperties();}));
     auto* draw=menuBar()->addMenu("绘图");auto* measure=menuBar()->addMenu("测量");auto* view=menuBar()->addMenu("视图");
     auto* fit=action("显示全部",[this]{canvas()->fitDrawing();},"Home");view->addAction(fit);view->addAction(action("框选缩放",[this]{canvas()->setTool(Tool::Zoom);}));
+    view->addAction(action("设置坐标原点",[this]{canvas()->setCoordinateOrigin(canvas()->cursorPoint());log("坐标原点已设为当前光标位置；状态栏与坐标命令按此原点显示 mm / mil。");}));
+    view->addAction(action("重置坐标原点",[this]{canvas()->setCoordinateOrigin({0,0});log("坐标原点已重置为图纸原点 (0,0)。");}));
     auto mode=[&](QString name,QString shortcut,bool CadCanvas::*member){auto* a=new QAction(name,this);a->setCheckable(true);a->setShortcut(QKeySequence(shortcut));connect(a,&QAction::triggered,this,[this,member](bool v){canvas()->*member=v;
         if(member==&CadCanvas::ortho&&v){canvas()->polar=false;polar_->setChecked(false);}if(member==&CadCanvas::polar&&v){canvas()->ortho=false;ortho_->setChecked(false);}canvas()->update();});view->addAction(a);return a;};
     snap_=mode("对象捕捉","F3",&CadCanvas::snap);ortho_=mode("正交","F8",&CadCanvas::ortho);polar_=mode("45° 极轴","F10",&CadCanvas::polar);grid_=mode("网格","F7",&CadCanvas::grid);
     auto* engineering=menuBar()->addMenu("工程分析");for(auto op:QStringList{"板框","孔径","间距","焊盘","工艺边","重复"})engineering->addAction(action(op,[this,op]{runAnalysis(op);}));
     engineering->addAction(action("清理重复对象",[this]{editSelected("清理");}));
-    auto* help=menuBar()->addMenu("帮助");help->addAction(action("关于 CAD / 支持范围",[this]{QMessageBox::information(this,branding::AppBrand::name()+" "+branding::AppBrand::version(),"Qiao · Qt 6 + C++20 / CMake\nASCII DXF 原生读写，DWG 通过内置 LibreDWG 或可选 ODA 读取。保存 DWG 需要 ODA。\n支持基础二维绘图、编辑、测量、图层和 PCB 分析。\n暂不显示的块、HATCH、复杂文字、布局和 3D 对象保留在转换后的 DXF 中，原 DWG 不保证无损转换。\nLibreDWG GPLv3 许可证及对应源码位于 tools/libredwg。\n圆角/倒角、填充、Gerber 对照、图纸空间后续实现。详见使用说明。");}));
+    auto* help=menuBar()->addMenu("帮助");help->addAction(action("操作教程 / 快速上手",[this]{showStartupTutorial(false);}));help->addAction(action("关于 CAD / 支持范围",[this]{QMessageBox::information(this,branding::AppBrand::name()+" "+branding::AppBrand::version(),"Qiao · Qt 6 + C++20 / CMake\nASCII DXF 原生读写，DWG 通过内置 LibreDWG 或可选 ODA 读取。保存 DWG 需要 ODA。\n支持基础二维绘图、编辑、测量、图层和 PCB 分析。\n暂不显示的块、HATCH、复杂文字、布局和 3D 对象保留在转换后的 DXF 中，原 DWG 不保证无损转换。\nLibreDWG GPLv3 许可证及对应源码位于 tools/libredwg。\n圆角/倒角、填充、Gerber 对照、图纸空间后续实现。详见使用说明。");}));
     auto* toolbar=addToolBar("文件与视图");toolbar->setObjectName("mainToolbar");toolbar->setMovable(false);
     auto* brandIcon=new QLabel;brandIcon->setObjectName("brandIcon");brandIcon->setPixmap(branding::AppBrand::icon().pixmap(28,28));brandIcon->setToolTip("Qiao");toolbar->addWidget(brandIcon);
     auto* brand=new QLabel(branding::AppBrand::name()+" · "+branding::AppBrand::iconLabel());brand->setObjectName("brand");toolbar->addWidget(brand);toolbar->addActions({newAction,open,save,undo_,redo_,fit,snap_,ortho_,polar_,grid_});
@@ -124,7 +129,7 @@ void MainWindow::buildUi() {
 void MainWindow::addDocument(Document document) {
     auto* c=new CadCanvas(std::make_shared<Document>(std::move(document)));connect(c,&CadCanvas::documentChanged,this,[this]{results_->clear();refresh();});
     connect(c,&CadCanvas::selectionChanged,this,&MainWindow::refreshProperties);connect(c,&CadCanvas::message,this,&MainWindow::log);
-    connect(c,&CadCanvas::coordinates,this,[this,c](QPointF p){if(c==canvas())coordinate_->setText("X "+value(p.x())+" · Y "+value(p.y())+" "+c->document->unitName());});
+    connect(c,&CadCanvas::coordinates,this,[this,c](QPointF p){if(c==canvas()){QPointF r=p-c->coordinateOrigin();coordinate_->setText("X "+c->document->dualLength(r.x())+" · Y "+c->document->dualLength(r.y()));}});
     connect(c,&CadCanvas::toolChanged,this,[this]{if(canvas())for(auto it=tools_.begin();it!=tools_.end();++it)it.value()->setChecked(it.key()==canvas()->tool());if(canvas())measurePanel_->setLive("—");});
     connect(c,&CadCanvas::liveMeasure,this,[this,c](QString text){if(c==canvas())measurePanel_->setLive(text);});
     connect(c,&CadCanvas::measured,this,[this,c](QString text,const QVector<EntityId>& ids){if(c==canvas())measurePanel_->addRecord(text,ids);});
@@ -218,7 +223,7 @@ void MainWindow::editProperties() {
     auto original=before[0];if(before.size()==1){if(original.kind!=Kind::Ellipse)for(qsizetype i=0;i<original.points.size();++i){auto* x=number(original.points[i].x());auto* y=number(original.points[i].y());points.append(qMakePair(x,y));form.addRow(QString("点 %1 X").arg(i+1),x);form.addRow(QString("点 %1 Y").arg(i+1),y);}
         if(original.kind==Kind::Circle||original.kind==Kind::Arc){radius=number(original.radius,0.000001);form.addRow("半径",radius);}
         if(original.kind==Kind::Text||original.kind==Kind::Dimension){text=new QLineEdit(original.text);form.addRow("文字 / 标注 <> = 实测值",text);}
-        if(original.kind==Kind::Text){height=number(original.height,0.000001);form.addRow("文字高度",height);}}
+        if(original.kind==Kind::Text||original.kind==Kind::Dimension){height=number(original.height>geo::epsilon?original.height:2,0.000001);form.addRow(original.kind==Kind::Text?"文字高度":"标注字高",height);}}
     if(!dialogButtons(dialog,form))return;
     QColor chosen;if(color->currentIndex()==2){chosen=QColorDialog::getColor(Qt::white,this,"对象颜色");if(!chosen.isValid())return;}
     auto after=before;if(after.size()==1){for(qsizetype i=0;i<points.size();++i)after[0].points[i]={points[i].first->value(),points[i].second->value()};
@@ -229,6 +234,49 @@ void MainWindow::editProperties() {
         if(after[0].kind==Kind::Rectangle&&after[0].points!=original.points)after[0].kind=Kind::Polyline;}
     for(auto& e:after){if(layer->currentIndex()>0)e.layer=layer->currentText();if(color->currentIndex()==1)e.color={};else if(chosen.isValid())e.color=chosen;}
     canvas()->document->commit("修改属性",before,after);canvas()->synchronize();results_->clear();refresh();
+}
+static QString startupTutorialHtml() {
+    return QStringLiteral(
+    "<h2 style='margin-bottom:4px;'>欢迎使用 CAD · Qiao</h2>"
+    "<p style='color:#555;'>PCB / FPC 二维绘图与测量工具。以下是快速上手操作教程。</p>"
+    "<h3>视图导航</h3><ul>"
+    "<li><b>滚轮</b> 缩放；<b>中键拖动</b> 平移；<b>Home</b> 显示全部。</li>"
+    "<li>视图 → 框选缩放：拖一个矩形放大该区域。</li></ul>"
+    "<h3>选择对象</h3><ul>"
+    "<li>单击选择；<b>Shift</b> 加选 / 减选。</li>"
+    "<li>左→右拖动 = 窗口选择（完全包含）；右→左 = 交叉选择（触碰即选）。</li>"
+    "<li>单击对象后右侧显示属性；双击属性或点“编辑 / 批量修改属性”可修改。</li></ul>"
+    "<h3>绘图</h3><ul>"
+    "<li>工具栏或命令：<b>LINE</b> 直线、<b>CIRCLE</b> 圆、<b>ARC</b> 圆弧、<b>PL</b> 多段线、<b>REC</b> 矩形、<b>TEXT</b> 文字。</li>"
+    "<li>精确输入：<b>10,20</b> 绝对坐标；<b>@5,0</b> 相对坐标；<b>20&lt;45</b> 距离&lt;角度。</li>"
+    "<li><b>Esc</b> 返回选择；多段线 <b>Enter</b> 完成、<b>C</b> 闭合。</li>"
+    "<li><b>F3</b> 对象捕捉、<b>F8</b> 正交、<b>F10</b> 极轴、<b>F7</b> 网格。</li></ul>"
+    "<h3>测量与标注（mm / mil 双单位）</h3><ul>"
+    "<li><b>对象间距</b>（命令 <b>GAP</b> / <b>MEASURE</b>）：依次单击两个对象。直线按中心到中心、圆 / 弧按边到边，线宽自动计入；结果同时显示 mm 与 mil，并在图纸上生成一条标注。</li>"
+    "<li>标注字高随间距自适应（小间距用小字）；选中标注后在属性里可改“标注字高”。</li>"
+    "<li><b>DI</b> 距离、<b>ID</b> 坐标；左侧“标注测量”面板实时显示并记录，单击记录可定位对象。</li>"
+    "<li>状态栏坐标为 mm / mil 双单位；视图 → <b>设置坐标原点</b> 以当前光标为原点，<b>重置坐标原点</b> 回到 (0,0)。</li></ul>"
+    "<h3>图层与工程分析</h3><ul>"
+    "<li>右侧“图层管理”：新增 / 删除 / 可见 / 锁定 / 颜色 / 线宽。</li>"
+    "<li>工程分析：板框、孔径、间距、焊盘、工艺边、重复；选区优先，单击结果定位图形。</li></ul>"
+    "<h3>文件与编辑</h3><ul>"
+    "<li><b>Ctrl+N</b> 新建、<b>Ctrl+O</b> 打开、<b>Ctrl+S</b> 保存、<b>Ctrl+Shift+S</b> 另存为。</li>"
+    "<li>原生读写 ASCII DXF；DWG 可直接读取（保存 DWG 需 ODA）；可导出 PDF。</li>"
+    "<li><b>Ctrl+Z</b> 撤销、<b>Ctrl+Y</b> 恢复、<b>Delete</b> 删除未锁定对象。</li>"
+    "<li>编辑命令：OFFSET 偏移、ROTATE 旋转、ARRAY 阵列、TRIM 修剪、EXTEND 延伸、EXPLODE 分解、JOIN 合并。</li></ul>"
+    "<p style='color:#555;'>完整说明见“帮助 → 关于”与 docs/USER_GUIDE.md。点击“开始使用”进入绘图界面。</p>");
+}
+void MainWindow::showStartupTutorial(bool startup) {
+    const QString key="ui/showStartupTutorial";
+    if(startup&&!settings_.value(key,true).toBool())return;
+    QDialog dialog(this);dialog.setWindowTitle("操作教程 · 快速上手");dialog.resize(760,600);
+    auto* layout=new QVBoxLayout(&dialog);
+    auto* browser=new QTextBrowser;browser->setHtml(startupTutorialHtml());layout->addWidget(browser,1);
+    auto* check=new QCheckBox("启动时显示本教程");check->setChecked(settings_.value(key,true).toBool());layout->addWidget(check);
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok);buttons->button(QDialogButtonBox::Ok)->setText("开始使用");layout->addWidget(buttons);
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);
+    dialog.exec();
+    settings_.setValue(key,check->isChecked());
 }
 void MainWindow::editSelected(QString op) {
     auto before=canvas()->document->selected(canvas()->selection,true);if(before.isEmpty()&&op!="清理"){log("请先选择可编辑对象。");return;}
