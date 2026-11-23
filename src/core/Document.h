@@ -46,6 +46,14 @@ public:
     QVector<Entity> selected(const QSet<EntityId>& ids, bool editableOnly=false) const;
     QRectF bounds(bool visibleOnly=true) const;
     QString unitName() const;
+    // Length formatting with a dual mm / mil readout. The declared document unit
+    // defines the conversion: 1 inch = 25.4 mm = 1000 mil. Drawings without a
+    // declared unit ($INSUNITS 0) are read as mm, which matches how PCB boards
+    // are exchanged in practice.
+    double mmPerUnit() const;
+    static double mmPerUnit(int units);
+    QString dualLength(double length, int mmPrecision = 3, int milPrecision = 1) const;
+    static QString dualLengthInUnits(double length, int units, int mmPrecision = 3, int milPrecision = 1);
     static Document demo();
 private:
     QVector<Change> history_;

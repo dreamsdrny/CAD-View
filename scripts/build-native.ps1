@@ -21,6 +21,7 @@ if (-not $SkipTests) {
     if ($LASTEXITCODE -ne 0) { throw 'Native tests failed.' }
 }
 $bin = Join-Path $build 'bin'
+& "$PSScriptRoot\prepare-dwg-reader.ps1" -Destination (Join-Path $bin 'tools\libredwg')
 & "$QtRoot\bin\windeployqt.exe" --release --compiler-runtime --no-translations --no-opengl-sw "$bin\CAD.exe"
 if ($LASTEXITCODE -ne 0) { throw 'Qt runtime deployment failed.' }
 Write-Host "Ready: $bin\CAD.exe"

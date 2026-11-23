@@ -10,9 +10,11 @@ int main(int argc,char** argv) {
     QDir input(args[1]);auto files=input.entryList(QDir::Files);
     if(files.size()!=1||files.first()!=args[7])return 12;
     QFile file(input.filePath(args[7]));if(!file.open(QIODevice::ReadOnly))return 13;
-    auto bytes=file.readAll();if(bytes=="FAIL")return 17;
+    auto bytes=file.readAll();if(bytes.startsWith("AC1032\n"))bytes.remove(0,7);
+    if(bytes=="FAIL")return 17;
     QFile output(QDir(args[2]).filePath("drawing."+args[4].toLower()));
     if(!output.open(QIODevice::WriteOnly))return 14;
     if(bytes=="EMPTY")return 0;
+    if(args[4]=="DWG")bytes.prepend("AC1032\n");
     return output.write(bytes)==bytes.size()?0:15;
 }

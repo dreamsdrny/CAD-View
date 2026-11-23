@@ -107,7 +107,7 @@ QByteArray sourceAttributes(const Record& r) {
     }
     return result;
 }
-std::optional<Entity> convert(const Record& r) {
+std::optional<Entity> convert(const Record& r,const DxfReadOptions& options) {
     const auto& t=r.tags;Entity e;e.layer=str(t,8,"0");e.color=color(t);e.sourceKey=r.key;e.sourceAttributes=sourceAttributes(r);
     if(num(t,210)!=0||num(t,220)!=0||num(t,230,1)!=1||num(t,30)!=0||num(t,31)!=0||num(t,38)!=0)return {};
     if(r.type=="LINE") {e.points={point(t),point(t,11)};if(geo::length(e.points[0],e.points[1])<geo::epsilon)return {};}
@@ -137,6 +137,88 @@ std::optional<Entity> convert(const Record& r) {
             e.widths.append({num(part.tags,40,num(header,40)),num(part.tags,41,num(header,41))});
         }
         if(e.points.size()<2)return {};
+    } else if(r.type=="SOLID"||r.type=="TRACE") {
+        if(raw(t,10).isEmpty()||raw(t,11).isEmpty()||raw(t,12).isEmpty()||raw(t,13).isEmpty()||num(t,32)!=0||num(t,33)!=0)return {};
+        e.kind=Kind::Hatch;e.readOnly=true;e.hatchLoops={0};
+        // DXF SOLID stores the last two corners in crossed order.
+        e.points={point(t,10),point(t,11),point(t,13),point(t,12)};
+        e.bulges={0,0,0,0};
+    } else if(r.type=="SPLINE") {
+        // Rational B-spline preview only: sample each nonempty knot span.
+        // Keep the original record, and exclude approximation from engineering measurements.
+        if(int(num(t,70))&2)return {}; // Periodic curves require seam-aware sampling.
+        double degreeValue=num(t,71),countValue=num(t,73),knotCountValue=num(t,72);
+        if(degreeValue<1||degreeValue>8||degreeValue!=std::floor(degreeValue)||countValue<2||countValue!=std::floor(countValue)||knotCountValue!=std::floor(knotCountValue))return {};
+        if(countValue>options.maxVerticesPerEntity||knotCountValue>options.maxVerticesPerEntity+9)fail("DXF 单个对象的顶点数超过限制。");
+        int degree=int(degreeValue),count=int(countValue),knotCount=int(knotCountValue);
+        if(count<=degree||knotCount!=count+degree+1)return {};
+        QVector<QPointF> controls;QVector<double> knots,weights;
+        for(const auto& p:t) {
+            if(p.code==10)controls.append({num(Tags{p},10),0});
+            else if(p.code==20&&!controls.isEmpty())controls.last().setY(num(Tags{p},20));
+            else if(p.code==30&&num(Tags{p},30)!=0)return {};
+            else if(p.code==40)knots.append(num(Tags{p},40));
+            else if(p.code==41)weights.append(num(Tags{p},41));
+        }
+        if(controls.size()!=count||knots.size()!=knotCount||(!weights.isEmpty()&&weights.size()!=count))return {};
+        if(!std::is_sorted(knots.cbegin(),knots.cend())||knots[degree]>=knots[count])return {};
+        for(double w:weights)if(w<=0)return {};
+        e.kind=Kind::SplinePreview;e.readOnly=true;
+        constexpr int samplesPerSpan=12;constexpr qsizetype maxPreviewPoints=100000;
+        auto sample=[&](int span,double u)->std::optional<QPointF> {
+            struct Weighted {double x,y,w;};QVector<Weighted> d;d.reserve(degree+1);
+            for(int j=0;j<=degree;++j){int index=span-degree+j;double w=weights.isEmpty()?1:weights[index];d.append({controls[index].x()*w,controls[index].y()*w,w});}
+            for(int level=1;level<=degree;++level)for(int j=degree;j>=level;--j){int k=span-degree+j;double denom=knots[k+degree-level+1]-knots[k];double a=denom==0?0:(u-knots[k])/denom;
+                d[j]={d[j-1].x*(1-a)+d[j].x*a,d[j-1].y*(1-a)+d[j].y*a,d[j-1].w*(1-a)+d[j].w*a};}
+            if(d[degree].w<=0)return {};
+            QPointF p(d[degree].x/d[degree].w,d[degree].y/d[degree].w);return geo::finite(p)?std::optional<QPointF>(p):std::nullopt;
+        };
+        for(int span=degree;span<count;++span)if(knots[span]<knots[span+1]) {
+            checkCancelled(options);
+            if(e.points.size()+samplesPerSpan+1>options.maxVerticesPerEntity)fail("DXF 样条预览顶点数超过限制。");
+            if(e.points.size()+samplesPerSpan+1>maxPreviewPoints)return {};
+            // Preserve discontinuities by declining unsupported full-multiplicity knots.
+            if(span>degree){int multiplicity=0;for(int j=span;j>=0&&knots[j]==knots[span];--j)++multiplicity;if(multiplicity>degree)return {};}
+            for(int j=e.points.isEmpty()?0:1;j<=samplesPerSpan;++j){auto p=sample(span,knots[span]+(knots[span+1]-knots[span])*j/samplesPerSpan);if(!p)return {};e.points.append(*p);}
+        }
+        if(e.points.size()<2)return {};
+    } else if(r.type=="HATCH") {
+        // Display solid polyline boundaries only. Keep the original HATCH and its
+        // associations untouched; this entity is a read-only drawing preview.
+        if(int(num(t,70))!=1)return {};
+        int style=int(num(t,75));if(style<0||style>2)return {};
+        double paths=num(t,91);if(paths<1||paths!=std::floor(paths)||paths>t.size())return {};
+        qsizetype pathCount=qsizetype(paths),totalVertices=0;
+        e.kind=Kind::Hatch;e.readOnly=true;
+        qsizetype i=0;while(i<t.size()&&t[i].code!=91)++i;
+        for(qsizetype path=0;path<pathCount;++path) {
+            checkCancelled(options);
+            while(i<t.size()&&t[i].code!=92)++i;
+            if(i==t.size())return {};
+            int flags=int(num(t.mid(i,1),92));++i;
+            if(!(flags&2))return {}; // Edge paths require different parsing.
+            qsizetype end=i;while(end<t.size()&&t[end].code!=92&&t[end].code!=75)++end;
+            auto loop=t.mid(i,end-i);double countValue=num(loop,93);
+            if(countValue<2||countValue!=std::floor(countValue))return {};
+            if(countValue>options.maxVerticesPerEntity-totalVertices)fail("DXF 单个对象的顶点数超过限制。");
+            qsizetype count=qsizetype(countValue);totalVertices+=count;
+            if(int(num(loop,73))!=1)return {};
+            bool include=style==0||(style==1&&(flags&(1|16)))||(style==2&&(flags&1));
+            QVector<QPointF> points;QVector<double> bulges;
+            bool vertices=false;
+            for(const auto& p:loop) {
+                if(p.code==93){vertices=true;continue;}
+                if(p.code==97)break;
+                if(!vertices)continue;
+                if(p.code==10){points.append({num(Tags{p},10),0});bulges.append(0);}
+                else if(p.code==20&&!points.isEmpty())points.last().setY(num(Tags{p},20));
+                else if(p.code==42&&!bulges.isEmpty())bulges.last()=num(Tags{p},42);
+            }
+            if(points.size()!=count)return {};
+            if(include){e.hatchLoops.append(e.points.size());e.points+=points;e.bulges+=bulges;}
+            i=end;
+        }
+        if(e.hatchLoops.isEmpty())return {};
     } else if(r.type=="ELLIPSE") {
         e.kind=Kind::Ellipse;e.points={point(t),point(t,11)};e.ratio=num(t,40,0.5);e.start=num(t,41);e.sweep=num(t,42,2*geo::pi);
         if(e.sweep<=e.start)e.sweep+=2*geo::pi;
@@ -175,19 +257,21 @@ bool transformInsert(Entity& e,const Tags& tags,QPointF base,QPointF offset) {
     e.translate(offset);e.rotate({},angle);e.translate(point(tags));return true;
 }
 bool expandInsert(const Record& r,const Blocks& blocks,const DxfReadOptions& options,
-                  QVector<Entity>& result,QSet<QString>& active,QString layer="0",QColor byBlock={},int depth=0) {
+                  QVector<Entity>& result,QSet<QString>& active,bool& complete,QString layer="0",QColor byBlock={},int depth=0) {
     checkCancelled(options);const auto& t=r.tags;QString name=str(t,2);
     if(depth>=options.maxBlockDepth||active.contains(name))fail("DXF 块引用循环或嵌套超过限制。");
-    if(!blocks.contains(name)||!blocks[name].supported||num(t,66)!=0||num(t,30)!=0||num(t,210)!=0||num(t,220)!=0||num(t,230,1)!=1)return false;
+    if(!blocks.contains(name)||!blocks[name].supported||num(t,30)!=0||num(t,210)!=0||num(t,220)!=0||num(t,230,1)!=1)return false;
+    if(num(t,66)!=0)complete=false;
     auto ownLayer=str(t,8,"0");if(ownLayer!="0")layer=ownLayer;
     auto ownColor=color(t);if(ownColor.isValid())byBlock=ownColor;
     else if(num(t,62,256)!=0)byBlock={};
     const auto& block=blocks[name];active.insert(name);QVector<Entity> local;
     for(const auto& child:block.contents) {
         checkCancelled(options);
-        if(child.type=="INSERT") {if(!expandInsert(child,blocks,options,local,active,layer,byBlock,depth+1)){active.remove(name);return false;}}
+        if(child.type=="INSERT") {if(!expandInsert(child,blocks,options,local,active,complete,layer,byBlock,depth+1))complete=false;}
         else {
-            auto e=convert(child);if(!e){active.remove(name);return false;}
+            auto e=convert(child,options);if(!e){complete=false;continue;}
+            if(e->readOnly)complete=false;
             if(e->layer=="0")e->layer=layer;
             if(num(child.tags,62,256)==0&&!e->color.isValid())e->color=byBlock;
             local.append(*e);
@@ -200,7 +284,7 @@ bool expandInsert(const Record& r,const Blocks& blocks,const DxfReadOptions& opt
     if(local.size()*cols*rows>options.maxExpandedEntities-result.size())fail("DXF 块展开对象数超过限制。");
     for(int row=0;row<int(rows);++row)for(int col=0;col<int(cols);++col)for(auto e:local) {
         checkCancelled(options);
-        if(!transformInsert(e,t,block.base,{col*num(t,44),row*num(t,45)}))return false;
+        if(!transformInsert(e,t,block.base,{col*num(t,44),row*num(t,45)})){complete=false;continue;}
         result.append(e);
     }
     return true;
@@ -301,14 +385,14 @@ Tags updated(const Record& r,const Entity& e) {
     t.insert(commonEnd,tag(62,256.));if(e.color.isValid())t.insert(commonEnd,tag(420,double(e.color.rgb()&0xffffff)));
     return t;
 }
-Tags dimensionBlock(const Entity& e,QString name) {
+Tags dimensionBlock(const Entity& e,QString name,int units) {
     Tags t{tag(0,"BLOCK"),tag(100,"AcDbEntity"),tag(8,e.layer),tag(100,"AcDbBlockBegin"),tag(2,name),tag(70,1.),tag(10,0.),tag(20,0.),tag(30,0.),tag(3,name),tag(1,"")};
     auto a=e.points[0],b=e.points[1],c=e.points[2],delta=c-geo::project(c,a,b,false),aa=a+delta,bb=b+delta;
     auto line=[&](QPointF p,QPointF q){Entity l;l.points={p,q};l.layer=e.layer;l.color=e.color;t+=fresh(l);};
     line(a,aa);line(b,bb);line(aa,bb);
     double len=geo::length(a,b),size=std::min(1.,len/10);if(len>geo::epsilon){auto u=(b-a)/len;for(auto p:{aa,bb}){double sign=p==aa?1:-1;
         for(double side:{-1.,1.})line(p,p+u*(sign*size)+QPointF(-u.y(),u.x())*(side*size/3));}}
-    Entity label;label.kind=Kind::Text;label.layer=e.layer;label.points={(aa+bb)/2+QPointF(0,0.8)};label.height=2;label.text=e.text;label.text.replace("<>",value(len,3));t+=fresh(label);
+    Entity label;label.kind=Kind::Text;label.layer=e.layer;label.points={(aa+bb)/2+QPointF(0,0.8)};label.height=2;label.text=e.text;label.text.replace("<>",Document::dualLengthInUnits(len,units));t+=fresh(label);
     t+={tag(0,"ENDBLK"),tag(100,"AcDbEntity"),tag(8,e.layer),tag(100,"AcDbBlockEnd")};return t;
 }
 Tags newLayer(const Layer& l) {return {tag(0,"LAYER"),tag(100,"AcDbSymbolTableRecord"),tag(100,"AcDbLayerTableRecord"),tag(2,l.name),tag(70,l.locked?4.:0.),tag(62,l.visible?7.:-7.),tag(6,"CONTINUOUS"),tag(420,double(l.color.rgb()&0xffffff)),tag(370,std::round(l.lineweight*100))};}
@@ -325,7 +409,7 @@ Document DxfAdapter::parse(const QByteArray& bytes,const DxfReadOptions& options
     auto tags=parseTags(bytes,options);checkCancelled(options);auto recs=records(tags,options);bool entitiesSection=false,eof=false;
     Document d;d.sourceDxf=bytes;d.units=0;
     for(qsizetype i=0;i<tags.size();++i)if(tags[i].code==9&&string(tags[i].raw)=="$INSUNITS"&&i+1<tags.size())d.units=int(num(tags.mid(i+1,1),70));
-    QMap<QString,int> skipped;
+    QMap<QString,int> skipped;int partialInserts=0,splinePreviews=0;
     Blocks blocks;QString blockName;
     for(const auto& r:recs)if(r.section=="BLOCKS") {
         checkCancelled(options);
@@ -343,17 +427,18 @@ Document DxfAdapter::parse(const QByteArray& bytes,const DxfReadOptions& options
         }
         if(model(r)&&r.type!="SECTION"&&r.type!="ENDSEC") {
             if(r.type=="INSERT") {
-                QVector<Entity> expanded;QSet<QString> active;
-                if(expandInsert(r,blocks,options,expanded,active)&&!expanded.isEmpty()) {
+                QVector<Entity> expanded;QSet<QString> active;bool complete=true;
+                if(expandInsert(r,blocks,options,expanded,active,complete)&&!expanded.isEmpty()) {
                     if(expanded.size()>options.maxExpandedEntities-d.entities.size())fail("DXF 块展开对象数超过限制。");
-                    for(qsizetype i=0;i<expanded.size();++i){auto& e=expanded[i];e.sourceKey=r.key+"/"+QString::number(i);e.sourceAttributes+=sourceAttributes(r);d.load(e);}
+                    if(!complete)++partialInserts;
+                    for(qsizetype i=0;i<expanded.size();++i){auto& e=expanded[i];if(e.kind==Kind::SplinePreview)++splinePreviews;e.readOnly|=!complete;e.sourceKey=r.key+"/"+QString::number(i);e.sourceAttributes+=sourceAttributes(r);d.load(e);}
                     d.importedKeys.insert(r.key);
                 } else skipped[r.type]++;
                 continue;
             }
-            auto e=convert(r);
-            if(e){d.load(*e);
-                d.importedKeys.insert(r.key);
+            auto e=convert(r,options);
+            if(e){if(e->kind==Kind::SplinePreview)++splinePreviews;if(e->readOnly)e->sourceKey=r.key+"/preview";d.load(*e);
+                if(!e->readOnly)d.importedKeys.insert(r.key);
             }else skipped[r.type]++;
         }
     }
@@ -361,11 +446,19 @@ Document DxfAdapter::parse(const QByteArray& bytes,const DxfReadOptions& options
     recordNumber=0;for(const auto& e:d.entities){if(++recordNumber%1024==0)checkCancelled(options);d.baseline.insert(e.sourceKey,e);if(!d.layers.contains(e.layer))d.layers.insert(e.layer,Layer{e.layer});}
     d.sourceLayers=d.layers;
     for(auto it=skipped.begin();it!=skipped.end();++it)d.warnings.append(QString("%1 × %2 暂不显示/编辑，保存时保留源记录。").arg(it.key()).arg(it.value()));
+    if(partialInserts)d.warnings.append(QString("%1 个块部分显示；为保护原始数据，这些块只读，保存时保留原始块引用。").arg(partialInserts));
+    if(splinePreviews)d.warnings.append(QString("SPLINE × %1 为近似只读预览，不参与捕捉、长度和工程间距计算；保存时保留原记录。").arg(splinePreviews));
     if(d.units==0)d.warnings.append("文件未声明单位，按图形坐标单位显示。");
     for(const auto& l:d.layers)if(l.visible&&!l.locked){d.currentLayer=l.name;break;}
     d.markSaved();return d;
 }
 QByteArray DxfAdapter::serialize(const Document& d) {
+    QHash<QString,Entity> current;QVector<Entity> additions;QSet<QString> layerNames;
+    for(const auto& e:d.entities){if(e.sourceKey.isEmpty())additions.append(e);else current.insert(e.sourceKey,e);}
+    for(auto it=d.baseline.cbegin();it!=d.baseline.cend();++it)if(it.value().readOnly) {
+        if(!current.contains(it.key())||current.value(it.key())!=it.value())fail("只读的 DXF 填充或不完整块不能修改；原始记录已保留。");
+    }
+    for(const auto& e:additions)if(e.kind==Kind::Hatch||e.readOnly)fail("只读预览对象不能另存为新图元。");
     bool legacy=false;
     if(!d.sourceDxf.isEmpty()) {
         auto sourceTags=parseTags(d.sourceDxf);QString version;
@@ -374,15 +467,13 @@ QByteArray DxfAdapter::serialize(const Document& d) {
     }
     QByteArray skeleton="0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1024\n9\n$INSUNITS\n70\n4\n0\nENDSEC\n0\nSECTION\n2\nTABLES\n0\nTABLE\n2\nLAYER\n70\n0\n0\nENDTAB\n0\nENDSEC\n0\nSECTION\n2\nBLOCKS\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n";
     auto recs=records(parseTags(d.sourceDxf.isEmpty()?skeleton:d.sourceDxf));
-    QHash<QString,Entity> current;QVector<Entity> additions;QSet<QString> layerNames;
-    for(const auto& e:d.entities){if(e.sourceKey.isEmpty())additions.append(e);else current.insert(e.sourceKey,e);}
     std::sort(additions.begin(),additions.end(),[](const Entity& a,const Entity& b){return a.id<b.id;});
     Tags extraEntities,extraBlocks;
     QSet<QString> blockNames;for(const auto& r:recs)if(r.type=="BLOCK")blockNames.insert(str(r.tags,2));
     auto add=[&](const Entity& e){if(e.kind==Kind::Dimension&&!legacy){QString name="*DCADWB"+QString::number(e.id)+"_"+QString::number(recs.size());
         while(blockNames.contains(name))name+="_";
         blockNames.insert(name);
-        extraBlocks+=dimensionBlock(e,name);extraEntities+=fresh(e,name);}else extraEntities+=fresh(e,{},legacy);};
+        extraBlocks+=dimensionBlock(e,name,d.units);extraEntities+=fresh(e,name);}else extraEntities+=fresh(e,{},legacy);};
     for(const auto& e:additions)add(e);
     for(const auto& e:current)if(e.kind==Kind::Dimension&&e!=d.baseline.value(e.sourceKey))add(e);
     // Virtual block children share their root INSERT identity. Keep the original

@@ -20,7 +20,8 @@ int main(int argc,char** argv) {
     if(arguments.size()==4&&arguments[1]=="--roundtrip-test") {
         try {
             auto d=cad::io::DxfAdapter::read(arguments[2]);
-            auto before=d.entities.values().toVector(),after=before;
+            QVector<cad::Entity> before;for(const auto& entity:d.entities)if(d.editable(entity.id))before.append(entity);
+            auto after=before;
             for(auto& entity:after)entity.translate({2,3});
             d.commit("测试平移",before,after);cad::io::DxfAdapter::write(d,arguments[3]);return 0;
         }catch(const std::exception&){return 1;}
@@ -34,7 +35,7 @@ int main(int argc,char** argv) {
             return 0;
         }catch(const std::exception& e){QTextStream(stderr)<<"DWG roundtrip failed: "<<QString::fromUtf8(e.what())<<Qt::endl;return 1;}
     }
-    cad::ui::MainWindow window;window.show();
+    cad::ui::MainWindow window(!arguments.contains("--check-open"));window.show();
     if((arguments.size()==4||arguments.size()==5)&&arguments[1]=="--check-open") {
         window.setProperty("checkOpen",true);
         bool finished=false;
@@ -45,6 +46,7 @@ int main(int argc,char** argv) {
             QJsonObject result{{"success",error.isEmpty()},{"requestedPath",arguments[2]},{"loadedPath",d.path},
                 {"title",d.title},{"entities",int(d.entities.size())},{"layers",int(d.layers.size())},
                 {"warnings",QJsonArray::fromStringList(d.warnings)},{"error",error},
+                {"hasDisplayableEntities",error.isEmpty()&&!d.entities.isEmpty()},
                 {"bounds",QJsonArray{bounds.x(),bounds.y(),bounds.width(),bounds.height()}}};
             if(error.isEmpty()&&arguments.size()==5) {
                 window.canvas()->fitDrawing();

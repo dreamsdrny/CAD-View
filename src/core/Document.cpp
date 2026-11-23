@@ -40,7 +40,7 @@ void Document::markSaved() {savedCursor_=cursor_;}
 bool Document::editable(EntityId id) const {
     if(!entities.contains(id))return false;
     const auto l=layers.value(entities.value(id).layer);
-    return l.visible&&!l.locked;
+    return l.visible&&!l.locked&&!entities.value(id).readOnly;
 }
 QVector<Entity> Document::selected(const QSet<EntityId>& ids,bool editableOnly) const {
     QVector<Entity> result;
@@ -55,6 +55,17 @@ QRectF Document::bounds(bool visibleOnly) const {
 }
 QString Document::unitName() const {
     switch(units) {case 1:return "inch";case 4:return "mm";case 5:return "cm";case 6:return "m";case 9:return "mil";case 13:return "µm";default:return "图形单位";}
+}
+double Document::mmPerUnit(int units) {
+    switch(units) {case 1:return 25.4;case 5:return 10.;case 6:return 1000.;case 9:return 0.0254;case 13:return 0.001;case 4:default:return 1.;}
+}
+double Document::mmPerUnit() const {return mmPerUnit(units);}
+QString Document::dualLengthInUnits(double length,int units,int mmPrecision,int milPrecision) {
+    double mm=length*mmPerUnit(units);
+    return QString::number(mm,'f',mmPrecision)+" mm / "+QString::number(mm/0.0254,'f',milPrecision)+" mil";
+}
+QString Document::dualLength(double length,int mmPrecision,int milPrecision) const {
+    return dualLengthInUnits(length,units,mmPrecision,milPrecision);
 }
 Document Document::demo() {
     Document d; d.title="PCB 演示板"; d.currentLayer="BOARD";

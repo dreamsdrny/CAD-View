@@ -1,5 +1,6 @@
 #include "core/Document.h"
 #include "core/Editing.h"
+#include "core/Measure.h"
 #include "core/SpatialIndex.h"
 #include "io/DxfAdapter.h"
 #include "io/DwgAdapter.h"
@@ -9,6 +10,7 @@
 #include <QFile>
 #include <cmath>
 #include "GenesisFixture.h"
+#include "MarkFixture.h"
 #include "ConverterFixture.h"
 #include <QDir>
 
@@ -46,11 +48,104 @@ private slots:
         Entity a;a.kind=Kind::Circle;a.points={{0,0}};a.radius=1;auto b=a;b.points={{3,0}};QCOMPARE(engineering::clearance(a,b),1.);
         b.radius=4;b.points={{0,0}};QCOMPARE(engineering::clearance(a,b),0.);QCOMPARE(engineering::boundaryGap(a,b),3.);
     }
+    void dualUnitsAndClosestGeometry() {
+        Document d;d.units=4;QCOMPARE(d.dualLength(1.),QString("1.000 mm / 39.4 mil"));
+        d.units=9;QCOMPARE(d.dualLength(100.),QString("2.540 mm / 100.0 mil"));
+        d.units=1;QCOMPARE(d.dualLength(1.),QString("25.400 mm / 1000.0 mil"));
+        QCOMPARE(Document::dualLengthInUnits(0.0254,4),QString("0.025 mm / 1.0 mil"));
+        QVERIFY(std::abs(Document::mmPerUnit(6)-1000.)<1e-9);
+        auto seg=geo::closestSegments({0,0},{10,0},{0,10},{10,10});
+        QVERIFY(seg);QVERIFY(std::abs(seg->distance-10.)<1e-9);
+        auto cross=geo::closestSegments({0,0},{10,10},{0,10},{10,0});
+        QVERIFY(cross);QVERIFY(cross->distance<geo::epsilon);
+        QVERIFY(geo::angleOnArc(45,0,90));QVERIFY(!geo::angleOnArc(135,0,90));QVERIFY(geo::angleOnArc(350,270,180));
+        auto arcs=geo::closestArcs({{0,0},5,0,360},{{20,0},5,180,90});
+        QVERIFY(arcs);QVERIFY(std::abs(arcs->distance-10.)<1e-9);QCOMPARE(arcs->a,QPointF(5,0));QCOMPARE(arcs->b,QPointF(15,0));
+        arcs=geo::closestArcs({{0,0},10,0,360},{{0,0},3,0,360});
+        QVERIFY(arcs);QVERIFY(std::abs(arcs->distance-7.)<1e-9);
+        arcs=geo::closestArcs({{0,0},5,90,90},{{20,0},5,180,90});
+        QVERIFY(arcs);QVERIFY(std::abs(arcs->distance-std::sqrt(250.))<1e-9);
+        auto arcSeg=geo::closestArcSegment({{0,0},5,0,360},{3,2},{6,2});
+        QVERIFY(arcSeg);QVERIFY(arcSeg->distance<geo::epsilon);
+        arcSeg=geo::closestArcSegment({{0,0},5,0,360},{30,2},{34,2});
+        QVERIFY(arcSeg);QVERIFY(std::abs(arcSeg->distance-(std::hypot(30.,2.)-5))<1e-9);
+    }
+    void measureEntityGaps() {
+        Entity a,b;a.points={{0,0},{10,0}};b.points={{0,10},{10,10}};
+        auto g=measure::gap(a,b);
+        QVERIFY(g);QVERIFY(std::abs(g->centerDistance-10.)<1e-9);QVERIFY(std::abs(g->edgeDistance-10.)<1e-9);
+        b.points={{2,0},{8,0}};g=measure::gap(a,b);QVERIFY(g);QVERIFY(g->edgeDistance<geo::epsilon);
+        Entity t1,t2;t1.kind=Kind::Polyline;t1.points={{0,0},{10,0}};t1.constantWidth=2;
+        t2=t1;t2.points={{0,10},{10,10}};
+        g=measure::gap(t1,t2);
+        QVERIFY(g);QVERIFY(std::abs(g->centerDistance-10.)<1e-9);QVERIFY(std::abs(g->edgeDistance-8.)<1e-9);
+        Entity c1,c2;c1.kind=Kind::Circle;c1.points={{0,0}};c1.radius=5;
+        c2.kind=Kind::Circle;c2.points={{20,0}};c2.radius=5;
+        g=measure::gap(c1,c2);
+        QVERIFY(g);QVERIFY(std::abs(g->edgeDistance-10.)<1e-9);QVERIFY(std::abs(g->centerDistance-20.)<1e-9);QCOMPARE(g->a,QPointF(5,0));QCOMPARE(g->b,QPointF(15,0));
+        Entity trace;trace.kind=Kind::Polyline;trace.points={{0,15},{30,15}};trace.constantWidth=2;
+        g=measure::gap(c1,trace);
+        QVERIFY(g);QVERIFY(std::abs(g->edgeDistance-9.)<1e-9);QCOMPARE(g->a,QPointF(0,5));QCOMPARE(g->b,QPointF(0,14));
+        Entity text;text.kind=Kind::Text;text.points={{0,0}};text.text="x";
+        QVERIFY(!measure::gap(text,a));
+    }
     void dxfRoundtrip() {
         auto d=Document::demo();auto bytes=io::DxfAdapter::serialize(d);auto loaded=io::DxfAdapter::parse(bytes);
         QCOMPARE(loaded.entities.size(),d.entities.size());QCOMPARE(loaded.units,4);QCOMPARE(engineering::holes(loaded.entities.values().toVector())[0].ids.size(),4);
         auto second=io::DxfAdapter::parse(io::DxfAdapter::serialize(loaded));QCOMPARE(second.entities.size(),loaded.entities.size());
         QTemporaryDir temp;io::DxfAdapter::write(d,temp.filePath("demo.dxf"));QCOMPARE(io::DxfAdapter::read(temp.filePath("demo.dxf")).entities.size(),26);
+    }
+    void markHatchNestedMirroredAndSafe() {
+        auto source=markFixture();auto d=io::DxfAdapter::parse(source);QCOMPARE(d.entities.size(),4);
+        int hatches=0,circles=0;
+        for(const auto& e:d.entities) {
+            QVERIFY(e.readOnly);QVERIFY(!d.editable(e.id));
+            if(e.kind==Kind::Hatch){++hatches;QCOMPARE(e.hatchLoops.size(),4);QCOMPARE(e.points.size(),12);QVERIFY(std::abs(e.bulges[2]+0.4142135623730951)<1e-12);}
+            if(e.kind==Kind::Circle){++circles;QVERIFY(geo::length(e.points[0],{18,33})<1e-9||geo::length(e.points[0],{18,26})<1e-9);}
+        }
+        QCOMPARE(hatches,2);QCOMPARE(circles,2);QVERIFY(d.warnings.join(' ').contains("只读"));
+        auto saved=io::DxfAdapter::serialize(d);QCOMPARE(io::DxfAdapter::parse(saved).entities.size(),4);
+        QCOMPARE(saved.count("0\nINSERT\n"),source.count("0\nINSERT\n"));QCOMPARE(saved.count("0\nHATCH\n"),1);
+        auto e=d.entities.begin().value(),changed=e;changed.translate({1,0});d.commit("invalid",{e},{changed});
+        QVERIFY_EXCEPTION_THROWN(io::DxfAdapter::serialize(d),std::runtime_error);
+        auto limited=io::DxfReadOptions{};limited.maxVerticesPerEntity=3;QVERIFY_EXCEPTION_THROWN(io::DxfAdapter::parse(source,limited),std::runtime_error);
+    }
+    void incompleteBlockPreview() {
+        QByteArray source="0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n2\nB\n10\n0\n20\n0\n0\nLINE\n10\n0\n20\n0\n11\n1\n21\n0\n0\nSPLINE\n0\nENDBLK\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nINSERT\n2\nB\n10\n2\n20\n3\n0\nENDSEC\n0\nEOF\n";
+        auto d=io::DxfAdapter::parse(source);QCOMPARE(d.entities.size(),1);auto e=d.entities.begin().value();
+        QCOMPARE(e.points[0],QPointF(2,3));QVERIFY(e.readOnly);QVERIFY(!d.editable(e.id));
+        auto saved=io::DxfAdapter::serialize(d);QVERIFY(saved.contains("0\nSPLINE\n"));QVERIFY(saved.contains("0\nINSERT\n"));
+        d.commit("delete",{e},{});QVERIFY_EXCEPTION_THROWN(io::DxfAdapter::serialize(d),std::runtime_error);
+    }
+    void solidAndSplinePreviews() {
+        QByteArray source="0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n2\nB\n10\n0\n20\n0\n"
+            "0\nSOLID\n10\n0\n20\n0\n11\n2\n21\n0\n12\n0\n22\n1\n13\n2\n23\n1\n"
+            "0\nSPLINE\n70\n8\n71\n2\n72\n6\n73\n3\n40\n0\n40\n0\n40\n0\n40\n1\n40\n1\n40\n1\n"
+            "41\n1\n41\n0.5\n41\n1\n10\n0\n20\n0\n30\n0\n10\n1\n20\n2\n30\n0\n10\n2\n20\n0\n30\n0\n"
+            "0\nENDBLK\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nINSERT\n2\nB\n10\n10\n20\n20\n41\n-1\n42\n1\n0\nENDSEC\n0\nEOF\n";
+        auto d=io::DxfAdapter::parse(source);QCOMPARE(d.entities.size(),2);
+        for(const auto& e:d.entities){QVERIFY(e.readOnly);QVERIFY(!d.editable(e.id));
+            if(e.kind==Kind::Hatch){QCOMPARE(e.points,QVector<QPointF>({{10,20},{8,20},{8,21},{10,21}}));}
+            else {QCOMPARE(e.kind,Kind::SplinePreview);QCOMPARE(e.points.size(),13);QVERIFY(geo::length(e.points[6],{9,20+2./3})<1e-9);QCOMPARE(e.length(),0.);QVERIFY(e.snapPoints().isEmpty());}}
+        auto saved=io::DxfAdapter::serialize(d);QVERIFY(saved.contains("0\nSPLINE\n"));QVERIFY(saved.contains("0\nSOLID\n"));QCOMPARE(io::DxfAdapter::parse(saved).entities.size(),2);
+        auto incomplete=source;incomplete.replace("73\n3\n40\n0", "73\n4\n40\n0");auto partial=io::DxfAdapter::parse(incomplete);QCOMPARE(partial.entities.size(),1);
+        auto periodic=source;periodic.replace("70\n8\n71\n2", "70\n10\n71\n2");QCOMPARE(io::DxfAdapter::parse(periodic).entities.size(),1);
+        auto options=io::DxfReadOptions{};options.maxVerticesPerEntity=4;QVERIFY_EXCEPTION_THROWN(io::DxfAdapter::parse(source,options),std::runtime_error);
+    }
+    void localProductionMarkDrawing() {
+        auto path=qEnvironmentVariable("CAD_TEST_MARK_DXF");if(path.isEmpty())QSKIP("Set CAD_TEST_MARK_DXF to check the production mark drawing.");
+        auto d=io::DxfAdapter::read(path);int hatchCount=0,matchCount=0;
+        for(const auto& e:d.entities) {
+            if(e.kind==Kind::Hatch)++hatchCount;
+            if(e.kind==Kind::Circle&&std::abs(e.radius-0.5)<1e-8)
+                for(auto expected:{QPointF(20598.43415426411,1860.133153980833),QPointF(20797.52668689134,1860.133153980833)})
+                    if(geo::length(e.points[0],expected)<1e-6)++matchCount;
+        }
+        QVERIFY(hatchCount>=30);QCOMPARE(matchCount,2);
+        auto saved=io::DxfAdapter::serialize(d);auto reread=io::DxfAdapter::parse(saved);
+        QCOMPARE(reread.entities.size(),d.entities.size());
+        qInfo()<<"Production mark drawing:"<<d.entities.size()<<"entities,"<<hatchCount<<"solid hatches";
+        for(const auto& warning:d.warnings)qInfo().noquote()<<warning;
     }
     void preserveSourceAndDelete() {
         QByteArray source="0\nSECTION\n2\nHEADER\n9\n$INSUNITS\n70\n4\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nLINE\n5\nAB\n8\n0\n6\nDASHED\n10\n0\n20\n0\n11\n10\n21\n0\n1001\nCUSTOM\n1000\nKEEPDATA\n0\nHATCH\n8\nKEEP\n62\n3\n0\nTEXT\n67\n1\n8\nPAPER\n1\nPAPER SPACE\n0\nENDSEC\n0\nEOF\n";
@@ -156,7 +251,7 @@ private slots:
         ConverterEnvironment environment;
         QTemporaryDir temp;QFile input(temp.filePath("invalid.dwg"));QVERIFY(input.open(QIODevice::WriteOnly));input.write("not a DWG");input.close();
         try {io::DwgAdapter::open(input.fileName(),temp.filePath("missing-converter.exe"));QFAIL("missing converter should fail");}
-        catch(const std::runtime_error& e){QVERIFY(QString::fromUtf8(e.what()).contains("ODA"));}
+        catch(const std::runtime_error& e){QVERIFY(QString::fromUtf8(e.what()).contains("文件头"));}
     }
     void converterDiscovery() {
         ConverterEnvironment environment;QTemporaryDir temp;
@@ -173,31 +268,30 @@ private slots:
         qputenv("ProgramFiles","");qputenv("PATH",QFileInfo(installed).absolutePath().toUtf8());
         QCOMPARE(io::DwgAdapter::findConverter(),installed);
     }
-    void companionDxfSafety() {
+    void noSilentCompanion() {
         ConverterEnvironment environment;QTemporaryDir temp;
         auto dwg=temp.filePath("中文图纸[版本02.dwg"),dxf=temp.filePath("中文图纸[版本02.DXF");
-        QFile source(dwg);QVERIFY(source.open(QIODevice::WriteOnly));source.write("original DWG bytes");source.close();
+        QFile source(dwg);QVERIFY(source.open(QIODevice::WriteOnly));source.write("AC1032\noriginal DWG bytes");source.close();
         io::DxfAdapter::write(Document::demo(),dxf);
-        QCOMPARE(io::DwgAdapter::companionDxf(dwg),dxf);
-        auto d=io::DwgAdapter::open(dwg,{});QCOMPARE(d.entities.size(),26);QCOMPARE(d.path,dxf);
-        QVERIFY(d.title.contains("DXF 副本"));QVERIFY(d.warnings.first().contains("不会覆盖原 DWG"));
+        QVERIFY_EXCEPTION_THROWN(io::DwgAdapter::open(dwg,{}),std::runtime_error);
+        auto d=Document::demo();
         QVERIFY_EXCEPTION_THROWN(io::DwgAdapter::save(d,dwg,{}),std::runtime_error);
-        QVERIFY(source.open(QIODevice::ReadOnly));QCOMPARE(source.readAll(),QByteArray("original DWG bytes"));source.close();
+        QVERIFY(source.open(QIODevice::ReadOnly));QCOMPARE(source.readAll(),QByteArray("AC1032\noriginal DWG bytes"));source.close();
         io::DxfReadOptions options;options.cancelled=[] {return true;};
         QVERIFY_EXCEPTION_THROWN(io::DwgAdapter::open(dwg,{},options),std::runtime_error);
         options={};options.maxBytes=1;QVERIFY_EXCEPTION_THROWN(io::DwgAdapter::open(dwg,{},options),std::runtime_error);
-        QVERIFY(QFile::remove(dwg));QVERIFY(io::DwgAdapter::companionDxf(dwg).isEmpty());
+        QVERIFY(QFile::remove(dwg));
         QVERIFY_EXCEPTION_THROWN(io::DwgAdapter::open(dwg,{}),std::runtime_error);
     }
     void converterSafeFilenameAndFailures() {
         auto stub=QCoreApplication::applicationDirPath()+"/fake_oda_converter.exe";QTemporaryDir temp;
         auto input=temp.filePath("中文图纸[版本02.dwg"),output=temp.filePath("roundtrip.dwg");
         // DXF bytes stand in for DWG only in the contract stub.
-        io::DxfAdapter::write(Document::demo(),input);
+        QFile fixture(input);QVERIFY(fixture.open(QIODevice::WriteOnly));fixture.write("AC1032\n"+io::DxfAdapter::serialize(Document::demo()));fixture.close();
         auto d=io::DwgAdapter::open(input,stub);QCOMPARE(d.entities.size(),26);QCOMPARE(d.path,input);
         QVERIFY(!d.title.contains("副本"));io::DwgAdapter::save(d,output,stub);
         QCOMPARE(io::DwgAdapter::open(output,stub).entities.size(),26);
-        QFile source(input);QVERIFY(source.open(QIODevice::WriteOnly));source.write("FAIL");source.close();
+        QFile source(input);QVERIFY(source.open(QIODevice::WriteOnly));source.write("AC1032\nFAIL");source.close();
         io::DxfAdapter::write(Document::demo(),temp.filePath("中文图纸[版本02.dxf"));
         try {io::DwgAdapter::open(input,stub);QFAIL("converter failure must not silently open companion");}
         catch(const std::runtime_error& e){QVERIFY(QString::fromUtf8(e.what()).contains("17"));}
@@ -206,6 +300,34 @@ private slots:
         QVERIFY(protectedFile.open(QIODevice::WriteOnly));protectedFile.write("keep");protectedFile.close();
         QVERIFY_EXCEPTION_THROWN(io::DwgAdapter::convert(input,protectedOutput,stub),std::runtime_error);
         QVERIFY(protectedFile.open(QIODevice::ReadOnly));QCOMPARE(protectedFile.readAll(),QByteArray("keep"));
+    }
+    void dwgVersionsAndReaderContract() {
+        ConverterEnvironment environment;QTemporaryDir temp;
+        qputenv("CAD_LIBREDWG_READER",(QCoreApplication::applicationDirPath()+"/fake_dwg_reader.exe").toUtf8());
+        auto path=temp.filePath("中文[图纸.dwg");QFile source(path);
+        auto write=[&](QByteArray bytes){QVERIFY(source.open(QIODevice::WriteOnly));source.write(bytes);source.close();};
+        for(const auto* header:{"AC1009","AC1012","AC1014","AC1015","AC1018","AC1021","AC1024","AC1027","AC1032"}) {
+            write(QByteArray(header)+"\n"+io::DxfAdapter::serialize(Document::demo()));
+            QVERIFY(io::DwgAdapter::version(path).contains(header));
+            auto d=io::DwgAdapter::open(path,{});QCOMPARE(d.entities.size(),26);QCOMPARE(d.path,path);
+            QVERIFY(d.warnings.first().contains("LibreDWG"));QVERIFY(!d.title.contains("副本"));
+        }
+        write("AC1032\nWARN\n"+io::DxfAdapter::serialize(Document::demo()));
+        QVERIFY(io::DwgAdapter::open(path,{}).warnings.last().contains("skipped proxy"));
+        write("AC1032\n"+io::DxfAdapter::serialize(Document{}));
+        auto empty=io::DwgAdapter::open(path,{});QVERIFY(empty.entities.isEmpty());
+        QVERIFY(empty.warnings.last().contains("没有可显示"));
+        io::DxfReadOptions limited;limited.maxBytes=6;
+        QVERIFY_EXCEPTION_THROWN(io::DwgAdapter::open(path,{},limited),std::runtime_error);
+        for(const auto* payload:{"FAIL","EMPTY","not a DXF"}) {
+            write(QByteArray("AC1032\n")+payload);
+            QVERIFY_EXCEPTION_THROWN(io::DwgAdapter::open(path,{}),std::runtime_error);
+        }
+        write("AC1032\nWAIT");QElapsedTimer timer;timer.start();io::DxfReadOptions options;
+        options.cancelled=[&]{return timer.elapsed()>250;};
+        QVERIFY_EXCEPTION_THROWN(io::DwgAdapter::open(path,{},options),std::runtime_error);
+        QVERIFY(timer.elapsed()<3000);
+        write("AC9999\n");QVERIFY_EXCEPTION_THROWN(io::DwgAdapter::version(path),std::runtime_error);
     }
     void largeDocument() {
         QElapsedTimer timer;timer.start();Document d;

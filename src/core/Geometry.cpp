@@ -101,6 +101,106 @@ QVector<QPointF> arcPoints(const Arc& a,double tolerance,TessellationStatus* sta
     }
     return result;
 }
+QPointF arcPointAt(const Arc& arc,double degrees) {
+    double t=degrees*pi/180;
+    return arc.center+QPointF(std::cos(t),std::sin(t))*arc.radius;
+}
+bool angleOnArc(double degrees,double start,double sweep) {
+    if(std::abs(sweep)>=360-epsilon) return true;
+    double rel=std::fmod(std::fmod(degrees-start,360.)+360.,360.);    // [0,360)
+    if(sweep<0) return rel<epsilon||rel>=360+sweep-epsilon;
+    return rel<=sweep+epsilon;
+}
+QVector<QPointF> circleIntersections(QPointF centerA,double radiusA,QPointF centerB,double radiusB) {
+    double d=length(centerA,centerB);
+    if(d<epsilon||d>radiusA+radiusB+epsilon||d<std::abs(radiusA-radiusB)-epsilon) return {};
+    double a=(radiusA*radiusA-radiusB*radiusB+d*d)/(2*d);
+    double h=std::sqrt(std::max(0.,radiusA*radiusA-a*a));
+    QPointF mid=centerA+(centerB-centerA)*(a/d);
+    if(h<epsilon) return {mid};
+    QPointF offset(-(centerB-centerA).y(),(centerB-centerA).x());
+    return {mid+offset*(h/d),mid-offset*(h/d)};
+}
+std::optional<Closest> closestSegments(QPointF a1,QPointF b1,QPointF a2,QPointF b2) {
+    if(length(a1,b1)<epsilon||length(a2,b2)<epsilon) return std::nullopt;
+    if(auto hit=intersection(a1,b1,a2,b2)) return Closest{0,*hit,*hit};
+    Closest best{std::numeric_limits<double>::infinity(),{},{}};
+    auto consider=[&](QPointF onFirst,QPointF onSecond) {
+        double d=length(onFirst,onSecond);
+        if(d<best.distance) best={d,onFirst,onSecond};
+    };
+    consider(a1,project(a1,a2,b2));consider(b1,project(b1,a2,b2));
+    consider(project(a2,a1,b1),a2);consider(project(b2,a1,b1),b2);
+    if(best.distance==std::numeric_limits<double>::infinity()) return std::nullopt;
+    return best;
+}
+std::optional<Closest> closestPointArc(QPointF p,const Arc& arc) {
+    if(arc.radius<=0) return std::nullopt;
+    double d=length(arc.center,p);
+    if(d<epsilon) {    // point sits on the center: the start point is a deterministic answer
+        auto q=arcPointAt(arc,arc.start);
+        return Closest{arc.radius,p,q};
+    }
+    double degrees=angle(arc.center,p);
+    if(angleOnArc(degrees,arc.start,arc.sweep)) {
+        auto q=arcPointAt(arc,degrees);
+        return Closest{std::abs(d-arc.radius),p,q};
+    }
+    auto s=arcPointAt(arc,arc.start),e=arcPointAt(arc,arc.start+arc.sweep);
+    double ds=length(p,s),de=length(p,e);
+    return ds<=de?Closest{ds,p,s}:Closest{de,p,e};
+}
+std::optional<Closest> closestArcSegment(const Arc& arc,QPointF a,QPointF b) {
+    if(arc.radius<=0||length(a,b)<epsilon) return std::nullopt;
+    Closest best{std::numeric_limits<double>::infinity(),{},{}};
+    auto consider=[&](QPointF onArc,QPointF onSegment) {
+        double d=length(onArc,onSegment);
+        if(d<best.distance) best={d,onArc,onSegment};
+    };
+    for(auto degrees:{arc.start,arc.start+arc.sweep}) consider(arcPointAt(arc,degrees),project(arcPointAt(arc,degrees),a,b));
+    for(auto p:{a,b}) if(auto hit=closestPointArc(p,arc)) consider(hit->b,hit->a);
+    // Critical points where the connecting line is radial and perpendicular to the segment.
+    auto foot=project(arc.center,a,b);
+    double centerDistance=length(arc.center,foot);
+    if(centerDistance>epsilon) {
+        double base=angle(arc.center,foot);
+        for(double degrees:{base,base+180.}) if(angleOnArc(degrees,arc.start,arc.sweep)) consider(arcPointAt(arc,degrees),foot);
+    }
+    // Segment ↔ circle crossings are exact zeros.
+    auto dir=b-a; long double dx=dir.x(),dy=dir.y();
+    long double fx=arc.center.x()-a.x(),fy=arc.center.y()-a.y();
+    long double qa=dx*dx+dy*dy,qb=-2*(fx*dx+fy*dy),qc=fx*fx+fy*fy-(long double)arc.radius*arc.radius;
+    long double disc=qb*qb-4*qa*qc;
+    if(disc>=0&&qa>0) for(long double t:{(-qb-std::sqrt(disc))/(2*qa),(-qb+std::sqrt(disc))/(2*qa)}) {
+        if(t<-epsilon||t>1+epsilon) continue;
+        QPointF p=a+dir*double(t);
+        if(angleOnArc(angle(arc.center,p),arc.start,arc.sweep)) consider(p,p);
+    }
+    if(best.distance==std::numeric_limits<double>::infinity()) return std::nullopt;
+    return best;
+}
+std::optional<Closest> closestArcs(const Arc& first,const Arc& second) {
+    if(first.radius<=0||second.radius<=0) return std::nullopt;
+    Closest best{std::numeric_limits<double>::infinity(),{},{}};
+    auto consider=[&](std::optional<Closest> candidate) {if(candidate&&candidate->distance<best.distance)best=*candidate;};
+    auto swapped=[&](std::optional<Closest> candidate)->std::optional<Closest> {
+        if(!candidate) return std::nullopt;
+        return Closest{candidate->distance,candidate->b,candidate->a};
+    };
+    for(auto degrees:{first.start,first.start+first.sweep}) consider(closestPointArc(arcPointAt(first,degrees),second));
+    for(auto degrees:{second.start,second.start+second.sweep}) consider(swapped(closestPointArc(arcPointAt(second,degrees),first)));
+    double centers=length(first.center,second.center);
+    if(centers>epsilon) {
+        double out=angle(first.center,second.center),back=angle(second.center,first.center);
+        for(double degrees:{out,out+180.}) if(angleOnArc(degrees,first.start,first.sweep)) consider(closestPointArc(arcPointAt(first,degrees),second));
+        for(double degrees:{back,back+180.}) if(angleOnArc(degrees,second.start,second.sweep)) consider(swapped(closestPointArc(arcPointAt(second,degrees),first)));
+    }
+    for(auto p:circleIntersections(first.center,first.radius,second.center,second.radius))
+        if(angleOnArc(angle(first.center,p),first.start,first.sweep)&&angleOnArc(angle(second.center,p),second.start,second.sweep))
+            consider(Closest{0,p,p});
+    if(best.distance==std::numeric_limits<double>::infinity()) return std::nullopt;
+    return best;
+}
 QRectF bounds(const QVector<QPointF>& points) {
     if(points.isEmpty()) return {};
     double x0=points[0].x(), x1=x0, y0=points[0].y(), y1=y0;

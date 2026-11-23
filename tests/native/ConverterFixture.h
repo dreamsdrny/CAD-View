@@ -6,7 +6,7 @@
 class ConverterEnvironment {
 public:
     ConverterEnvironment() {
-        for(const auto* key:{"CAD_ODA_CONVERTER","PATH","ProgramW6432","ProgramFiles","ProgramFiles(x86)"}) {
+        for(const auto* key:{"CAD_ODA_CONVERTER","CAD_LIBREDWG_READER","PATH","ProgramW6432","ProgramFiles","ProgramFiles(x86)"}) {
             values_.append({key,qgetenv(key),qEnvironmentVariableIsSet(key)});
             qputenv(key,"");
         }

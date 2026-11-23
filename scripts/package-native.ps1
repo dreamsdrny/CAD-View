@@ -38,6 +38,7 @@ New-Item -ItemType Directory -Path $stageRoot -Force | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'CMake install failed.' }
 & "$QtRoot\bin\windeployqt.exe" --release --compiler-runtime --no-translations --no-opengl-sw "$stageRoot\CAD.exe"
 if ($LASTEXITCODE -ne 0) { throw 'Runtime deployment failed.' }
+& "$PSScriptRoot\prepare-dwg-reader.ps1" -Destination (Join-Path $stageRoot 'tools\libredwg')
 if (-not (Test-Path -LiteralPath $root)) { throw 'Invalid project root.' }
 $dist = Join-Path $root 'dist'
 New-Item -ItemType Directory -Path $dist -Force | Out-Null

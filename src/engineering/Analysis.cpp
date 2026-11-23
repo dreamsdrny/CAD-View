@@ -49,7 +49,7 @@ QVector<Finding> board(const Entity& e,const QString& unit) {
             {"周长 = "+value(e.length())+" "+unit,{e.id},e.length()}};
 }
 QVector<Finding> clearances(const QVector<Entity>& entities,double minimum) {
-    Document d;for(const auto& e:entities)if(e.kind!=Kind::Text&&e.kind!=Kind::Dimension){d.layers.insert(e.layer,Layer{e.layer});d.load(e);}
+    Document d;for(const auto& e:entities)if(e.kind!=Kind::Text&&e.kind!=Kind::Dimension&&e.kind!=Kind::Hatch&&e.kind!=Kind::SplinePreview){d.layers.insert(e.layer,Layer{e.layer});d.load(e);}
     SpatialIndex index;index.rebuild(d);QVector<Finding> result;
     for(const auto& a:d.entities)for(auto id:index.query(a.bounds().adjusted(-minimum,-minimum,minimum,minimum))) {
         if(id<=a.id)continue;
@@ -64,13 +64,13 @@ QVector<Finding> edges(const Entity& board,const QVector<Entity>& entities,doubl
     if(!board.isClosed())throw std::runtime_error("板框必须闭合。");
     geo::TessellationStatus boardStatus;QVector<QPointF> boardOutline;if(board.kind!=Kind::Circle){boardOutline=board.outline(0.005,&boardStatus);if(boardStatus.budgetExceeded)throw std::runtime_error(("曲线离散超过预算，实际误差上界："+value(boardStatus.maxError,9)).toUtf8().constData());}
     QVector<Finding> result;
-    for(const auto& e:entities)if(e.id!=board.id&&e.kind!=Kind::Text&&e.kind!=Kind::Dimension) {
+    for(const auto& e:entities)if(e.id!=board.id&&e.kind!=Kind::Text&&e.kind!=Kind::Dimension&&e.kind!=Kind::Hatch&&e.kind!=Kind::SplinePreview) {
         double gap=boundaryGap(board,e);geo::TessellationStatus status;auto outline=e.outline(0.005,&status);if(status.budgetExceeded)throw std::runtime_error(("曲线离散超过预算，实际误差上界："+value(status.maxError,9)).toUtf8().constData());bool in=true;for(auto p:outline)if(!(board.kind==Kind::Circle?geo::length(board.points[0],p)<board.radius:insideOutline(p,boardOutline))){in=false;break;}
         if(!in||gap<minimum)result.append({in?QString("距板边 %1 < %2").arg(value(gap),value(minimum)):QString("板框外对象"),{board.id,e.id},gap});
     }return result;
 }
 QVector<Finding> pads(const QVector<Entity>& entities,double width,double height) {
-    QVector<Finding> result;for(const auto& e:entities)if(e.isClosed()) {
+    QVector<Finding> result;for(const auto& e:entities)if(e.isClosed()&&e.kind!=Kind::SplinePreview) {
         double w=e.bounds().width(),h=e.bounds().height();
         if(e.kind==Kind::Circle)w=h=e.radius*2;
         if(e.kind==Kind::Rectangle){w=geo::length(e.points[0],e.points[1]);h=geo::length(e.points[1],e.points[2]);}

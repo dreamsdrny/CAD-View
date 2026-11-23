@@ -1,0 +1,17 @@
+GNU LibreDWG 0.14 (unmodified upstream Windows x64 release)
+Copyright (C) Free Software Foundation, Inc. and contributors.
+License: GPL version 3 or (at your option) any later version. See COPYING.
+Project: https://www.gnu.org/software/libredwg/
+Release: https://github.com/LibreDWG/libredwg/releases/tag/0.14
+
+CAD invokes dwg2dxf.exe as a separate process for DWG import only.
+The exact complete corresponding LibreDWG source is provided alongside
+the binary as libredwg-0.14.tar.xz. Build instructions are in README/INSTALL
+and the source's Windows CI/build scripts. The archive includes the upstream
+build scripts and license notices. No LibreDWG source modifications were made.
+Only dwg2dxf.exe and libredwg-0.dll are deployed; no other upstream tools
+or optional DLLs are required by the reader's import table.
+
+DWG import is not a guarantee of complete preservation of unsupported,
+custom/proxy, encrypted or damaged objects. CAD's 2D renderer has its own
+entity support limits. Use a professional CAD reader for critical comparison.

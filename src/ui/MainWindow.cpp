@@ -1,4 +1,6 @@
 #include "MainWindow.h"
+#include "CommandParser.h"
+#include "MeasurePanel.h"
 #include "branding/AppBrand.h"
 #include "core/Editing.h"
 #include "io/DwgAdapter.h"
@@ -27,6 +29,7 @@
 #include <QFileDialog>
 #include <QColorDialog>
 #include <QFileInfo>
+#include <QDir>
 #include <QCloseEvent>
 #include <QStatusBar>
 #include <QTimer>
@@ -59,14 +62,15 @@ QAction* MainWindow::action(QString text,std::function<void()> callback,QString 
     auto* a=new QAction(text,this);if(!shortcut.isEmpty())a->setShortcut(QKeySequence(shortcut));connect(a,&QAction::triggered,this,[callback]{callback();});return a;
 }
 void MainWindow::buildUi() {
-    tabs_=new QTabWidget;tabs_->setTabsClosable(true);tabs_->setMovable(true);setCentralWidget(tabs_);
+    setDockOptions(QMainWindow::AllowTabbedDocks|QMainWindow::AnimatedDocks);
+    tabs_=new QTabWidget;tabs_->setObjectName("documentTabs");tabs_->setTabsClosable(true);tabs_->setMovable(true);setCentralWidget(tabs_);
     auto* file=menuBar()->addMenu("文件");
     auto* newAction=action("新建",[this]{addDocument(Document{});},"Ctrl+N");file->addAction(newAction);
     auto* open=action("打开 DXF / DWG",[this]{auto p=QFileDialog::getOpenFileName(this,"打开图纸",{},"CAD (*.dxf *.dwg)");if(!p.isEmpty())openPath(p);},"Ctrl+O");file->addAction(open);
     auto* save=action("保存",[this]{saveFile();},"Ctrl+S");file->addAction(save);file->addAction(action("另存为",[this]{saveFile(true);},"Ctrl+Shift+S"));
     file->addAction(action("导出 PDF",[this]{exportPdf();}));
     file->addAction(action("设置单位",[this]{QStringList names{"图形单位","inch","mm","cm","m","mil","µm"};QVector<int> codes{0,1,4,5,6,9,13};bool ok=false;
-        auto name=QInputDialog::getItem(this,"设置单位","仅声明单位，不缩放坐标",names,std::max(0,int(codes.indexOf(canvas()->document->units))),false,&ok);
+        auto name=QInputDialog::getItem(this,"设置单位","仅声明单位，不缩放坐标；测量 / 标注按该单位换算 mm 与 mil",names,std::max(0,int(codes.indexOf(canvas()->document->units))),false,&ok);
         if(ok){canvas()->document->setUnits(codes[names.indexOf(name)]);results_->clear();refresh();}}));
     file->addAction(action("配置 DWG 转换器",[this]{auto p=QFileDialog::getOpenFileName(this,"选择 ODAFileConverter.exe",io::DwgAdapter::findConverter(settings_.value("converter").toString()),"ODA 转换器 (ODAFileConverter.exe)");if(!p.isEmpty()){settings_.setValue("converter",p);log("已配置 DWG 转换器："+p);}}));
     file->addAction(action("打开演示板",[this]{addDocument(Document::demo());}));file->addSeparator();file->addAction(action("退出",[this]{close();},"Alt+F4"));
@@ -84,32 +88,35 @@ void MainWindow::buildUi() {
     snap_=mode("对象捕捉","F3",&CadCanvas::snap);ortho_=mode("正交","F8",&CadCanvas::ortho);polar_=mode("45° 极轴","F10",&CadCanvas::polar);grid_=mode("网格","F7",&CadCanvas::grid);
     auto* engineering=menuBar()->addMenu("工程分析");for(auto op:QStringList{"板框","孔径","间距","焊盘","工艺边","重复"})engineering->addAction(action(op,[this,op]{runAnalysis(op);}));
     engineering->addAction(action("清理重复对象",[this]{editSelected("清理");}));
-    auto* help=menuBar()->addMenu("帮助");help->addAction(action("关于 CAD / 支持范围",[this]{QMessageBox::information(this,branding::AppBrand::name()+" "+branding::AppBrand::version(),"Qiao · Qt 6 + C++20 / CMake\nASCII DXF 原生读写，DWG 通过 ODA 转换器。\n支持基础二维绘图、编辑、测量、图层和 PCB 分析。\n暂不显示的块、HATCH、复杂文字、布局和 3D 对象保留在源 DXF 中。\n圆角/倒角、填充、Gerber 对照、图纸空间后续实现。详见使用说明。");}));
-    auto* toolbar=addToolBar("文件与视图");toolbar->setMovable(false);
-    auto* brandIcon=new QLabel;brandIcon->setObjectName("brandIcon");brandIcon->setPixmap(branding::AppBrand::icon().pixmap(40,40));brandIcon->setToolTip("Qiao");toolbar->addWidget(brandIcon);
+    auto* help=menuBar()->addMenu("帮助");help->addAction(action("关于 CAD / 支持范围",[this]{QMessageBox::information(this,branding::AppBrand::name()+" "+branding::AppBrand::version(),"Qiao · Qt 6 + C++20 / CMake\nASCII DXF 原生读写，DWG 通过内置 LibreDWG 或可选 ODA 读取。保存 DWG 需要 ODA。\n支持基础二维绘图、编辑、测量、图层和 PCB 分析。\n暂不显示的块、HATCH、复杂文字、布局和 3D 对象保留在转换后的 DXF 中，原 DWG 不保证无损转换。\nLibreDWG GPLv3 许可证及对应源码位于 tools/libredwg。\n圆角/倒角、填充、Gerber 对照、图纸空间后续实现。详见使用说明。");}));
+    auto* toolbar=addToolBar("文件与视图");toolbar->setObjectName("mainToolbar");toolbar->setMovable(false);
+    auto* brandIcon=new QLabel;brandIcon->setObjectName("brandIcon");brandIcon->setPixmap(branding::AppBrand::icon().pixmap(28,28));brandIcon->setToolTip("Qiao");toolbar->addWidget(brandIcon);
     auto* brand=new QLabel(branding::AppBrand::name()+" · "+branding::AppBrand::iconLabel());brand->setObjectName("brand");toolbar->addWidget(brand);toolbar->addActions({newAction,open,save,undo_,redo_,fit,snap_,ortho_,polar_,grid_});
-    addToolBarBreak();auto* drawing=addToolBar("绘图与测量");drawing->setMovable(false);auto* group=new QActionGroup(this);
-    for(auto t:{Tool::Select,Tool::Line,Tool::Polyline,Tool::Rectangle,Tool::Circle,Tool::Arc,Tool::Ellipse,Tool::Text,Tool::Move,Tool::Copy,Tool::Mirror,Tool::Distance,Tool::Angle,Tool::Dimension}) {
+    addToolBarBreak();auto* drawing=addToolBar("绘图与测量");drawing->setObjectName("drawingToolbar");drawing->setMovable(false);auto* group=new QActionGroup(this);
+    for(auto t:{Tool::Select,Tool::Line,Tool::Polyline,Tool::Rectangle,Tool::Circle,Tool::Arc,Tool::Ellipse,Tool::Text,Tool::Move,Tool::Copy,Tool::Mirror,Tool::Distance,Tool::Gap,Tool::Angle,Tool::Dimension}) {
         auto* a=action(CadCanvas::toolName(t),[this,t]{canvas()->setTool(t);canvas()->setFocus();});a->setCheckable(true);group->addAction(a);tools_.insert(t,a);drawing->addAction(a);
         if(t>=Tool::Line&&t<=Tool::Text)draw->addAction(a);
         if(t>=Tool::Distance)measure->addAction(a);
     }
     for(auto t:{Tool::Horizontal,Tool::Vertical,Tool::Continuous,Tool::Coordinate})measure->addAction(action(CadCanvas::toolName(t),[this,t]{canvas()->setTool(t);}));
-    measure->addAction(action("对象面积 / 半径 / 周长",[this]{for(const auto& e:canvas()->document->selected(canvas()->selection)){QStringList text;for(auto [k,v]:e.properties(canvas()->document->unitName()))text.append(k+": "+v);log(text.join(" · "));}}));
+    measure->addAction(action("对象面积 / 半径 / 周长",[this]{for(const auto& e:canvas()->document->selected(canvas()->selection)){QStringList text;for(auto [k,v]:e.properties(*canvas()->document))text.append(k+": "+v);log(text.join(" · "));}}));
     auto dock=[&](QString title,QWidget* widget,Qt::DockWidgetArea area){auto* d=new QDockWidget(title,this);d->setObjectName(title);d->setWidget(widget);addDockWidget(area,d);view->addAction(d->toggleViewAction());return d;};
     auto* propsWidget=new QWidget;auto* propsLayout=new QVBoxLayout(propsWidget);properties_=new QTableWidget(0,2);properties_->setHorizontalHeaderLabels({"属性","数值"});properties_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);properties_->verticalHeader()->hide();properties_->setEditTriggers(QAbstractItemView::NoEditTriggers);propsLayout->addWidget(properties_);
-    auto* propertyButton=new QPushButton("编辑 / 批量修改属性");connect(propertyButton,&QPushButton::clicked,this,&MainWindow::editProperties);propsLayout->addWidget(propertyButton);connect(properties_,&QTableWidget::cellDoubleClicked,this,[this]{editProperties();});dock("对象属性",propsWidget,Qt::RightDockWidgetArea)->setMinimumWidth(285);
+    auto* propertyButton=new QPushButton("编辑 / 批量修改属性");connect(propertyButton,&QPushButton::clicked,this,&MainWindow::editProperties);propsLayout->addWidget(propertyButton);connect(properties_,&QTableWidget::cellDoubleClicked,this,[this]{editProperties();});auto* propertiesDock=dock("对象属性",propsWidget,Qt::RightDockWidgetArea);propertiesDock->setMinimumWidth(260);
     auto* layerWidget=new QWidget;auto* layerLayout=new QVBoxLayout(layerWidget);layerLayout->addWidget(new QLabel("当前绘图图层"));currentLayer_=new QComboBox;layerLayout->addWidget(currentLayer_);
     layers_=new QTableWidget(0,5);layers_->setHorizontalHeaderLabels({"图层","可见","锁定","颜色","线宽"});layers_->verticalHeader()->hide();layers_->horizontalHeader()->setSectionResizeMode(0,QHeaderView::Stretch);for(int i=1;i<5;++i)layers_->setColumnWidth(i,45);layers_->setEditTriggers(QAbstractItemView::NoEditTriggers);layerLayout->addWidget(layers_);
-    auto* buttons=new QHBoxLayout;for(auto name:QStringList{"新增","删除"}){auto* b=new QPushButton(name);buttons->addWidget(b);connect(b,&QPushButton::clicked,this,[this,name]{name=="新增"?addLayer():deleteLayer();});}layerLayout->addLayout(buttons);dock("图层管理",layerWidget,Qt::RightDockWidgetArea);
+    auto* buttons=new QHBoxLayout;for(auto name:QStringList{"新增","删除"}){auto* b=new QPushButton(name);buttons->addWidget(b);connect(b,&QPushButton::clicked,this,[this,name]{name=="新增"?addLayer():deleteLayer();});}layerLayout->addLayout(buttons);auto* layersDock=dock("图层管理",layerWidget,Qt::RightDockWidgetArea);tabifyDockWidget(layersDock,propertiesDock);layersDock->raise();
     connect(currentLayer_,&QComboBox::currentTextChanged,this,[this](QString name){if(!refreshing_&&canvas()&&canvas()->document->layers.contains(name))canvas()->document->currentLayer=name;});
     connect(layers_,&QTableWidget::itemChanged,this,[this](QTableWidgetItem* item){if(!refreshing_)changeLayer(item->row(),item->column());});
     connect(layers_,&QTableWidget::cellDoubleClicked,this,[this](int row,int col){if(col>=3)changeLayer(row,col);});
     auto* analysisWidget=new QWidget;auto* analysisLayout=new QVBoxLayout(analysisWidget);auto* hint=new QLabel("选区优先；未选择时按以下图层检查。\n钻孔/焊盘用途由工程师指定。");hint->setWordWrap(true);analysisLayout->addWidget(hint);scope_=new QComboBox;analysisLayout->addWidget(scope_);
     for(auto op:QStringList{"板框","孔径","间距","焊盘","工艺边","重复"}){auto* b=new QPushButton(op+"分析");connect(b,&QPushButton::clicked,this,[this,op]{runAnalysis(op);});analysisLayout->addWidget(b);}
-    results_=new QListWidget;analysisLayout->addWidget(results_);dock("PCB / FPC 工程分析",analysisWidget,Qt::LeftDockWidgetArea)->setMinimumWidth(255);
+    results_=new QListWidget;results_->setObjectName("analysisResults");analysisLayout->addWidget(results_);auto* analysisDock=dock("PCB / FPC 工程分析",analysisWidget,Qt::LeftDockWidgetArea);analysisDock->setMinimumWidth(255);analysisDock->hide();
     connect(results_,&QListWidget::itemClicked,this,[this](QListWidgetItem* item){QSet<EntityId> ids;for(const auto& v:item->data(Qt::UserRole).toList())ids.insert(v.toULongLong());canvas()->selectIds(ids);canvas()->centerOnSelection();});
-    auto* consoleWidget=new QWidget;auto* consoleLayout=new QVBoxLayout(consoleWidget);console_=new QTextEdit;console_->setReadOnly(true);console_->setMaximumHeight(100);consoleLayout->addWidget(console_);command_=new QLineEdit;command_->setPlaceholderText("命令 > LINE / CIRCLE / DIST · X,Y · @ΔX,ΔY · 距离<角度");consoleLayout->addWidget(command_);dock("命令与测量记录",consoleWidget,Qt::BottomDockWidgetArea);
+    measurePanel_=new MeasurePanel;auto* measureDock=dock("标注测量",measurePanel_,Qt::LeftDockWidgetArea);measureDock->setMinimumWidth(235);
+    tabifyDockWidget(analysisDock,measureDock);measureDock->raise();
+    connect(measurePanel_,&MeasurePanel::recordActivated,this,[this](const QVector<EntityId>& ids){if(ids.isEmpty())return;canvas()->selectIds(QSet<EntityId>(ids.begin(),ids.end()));canvas()->centerOnSelection();});
+    auto* consoleWidget=new QWidget;auto* consoleLayout=new QVBoxLayout(consoleWidget);console_=new QTextEdit;console_->setReadOnly(true);console_->setMaximumHeight(100);consoleLayout->addWidget(console_);command_=new QLineEdit;command_->setObjectName("commandInput");command_->setPlaceholderText("命令 > LINE / CIRCLE / DIST · X,Y · @ΔX,ΔY · 距离<角度");consoleLayout->addWidget(command_);dock("命令与测量记录",consoleWidget,Qt::BottomDockWidgetArea);
     connect(command_,&QLineEdit::returnPressed,this,[this]{auto text=command_->text();command_->clear();executeCommand(text);});
     coordinate_=new QLabel;count_=new QLabel;statusBar()->addPermanentWidget(count_);statusBar()->addPermanentWidget(coordinate_);
     connect(tabs_,&QTabWidget::currentChanged,this,[this]{if(canvas()){results_->clear();refresh();}});connect(tabs_,&QTabWidget::tabCloseRequested,this,&MainWindow::closeTab);
@@ -118,13 +125,15 @@ void MainWindow::addDocument(Document document) {
     auto* c=new CadCanvas(std::make_shared<Document>(std::move(document)));connect(c,&CadCanvas::documentChanged,this,[this]{results_->clear();refresh();});
     connect(c,&CadCanvas::selectionChanged,this,&MainWindow::refreshProperties);connect(c,&CadCanvas::message,this,&MainWindow::log);
     connect(c,&CadCanvas::coordinates,this,[this,c](QPointF p){if(c==canvas())coordinate_->setText("X "+value(p.x())+" · Y "+value(p.y())+" "+c->document->unitName());});
-    connect(c,&CadCanvas::toolChanged,this,[this]{if(canvas())for(auto it=tools_.begin();it!=tools_.end();++it)it.value()->setChecked(it.key()==canvas()->tool());});
+    connect(c,&CadCanvas::toolChanged,this,[this]{if(canvas())for(auto it=tools_.begin();it!=tools_.end();++it)it.value()->setChecked(it.key()==canvas()->tool());if(canvas())measurePanel_->setLive("—");});
+    connect(c,&CadCanvas::liveMeasure,this,[this,c](QString text){if(c==canvas())measurePanel_->setLive(text);});
+    connect(c,&CadCanvas::measured,this,[this,c](QString text,const QVector<EntityId>& ids){if(c==canvas())measurePanel_->addRecord(text,ids);});
     tabs_->setCurrentIndex(tabs_->addTab(c,c->document->title));refresh();QTimer::singleShot(0,c,[c]{c->fitDrawing();});
 }
 void MainWindow::refreshProperties() {
     if(!canvas())return;
     auto entities=canvas()->document->selected(canvas()->selection);QVector<QPair<QString,QString>> props;
-    if(entities.size()==1)props=entities[0].properties(canvas()->document->unitName());else props={{"已选对象",QString::number(entities.size())}};
+    if(entities.size()==1)props=entities[0].properties(*canvas()->document);else props={{"已选对象",QString::number(entities.size())}};
     properties_->setRowCount(props.size());for(qsizetype i=0;i<props.size();++i){properties_->setItem(i,0,new QTableWidgetItem(props[i].first));properties_->setItem(i,1,new QTableWidgetItem(props[i].second));}
 }
 void MainWindow::refresh() {
@@ -140,8 +149,12 @@ void MainWindow::refresh() {
         for(int col:{1,2}){auto* item=new QTableWidgetItem;item->setFlags(Qt::ItemIsEnabled|Qt::ItemIsSelectable|Qt::ItemIsUserCheckable);item->setCheckState((col==1?l.visible:l.locked)?Qt::Checked:Qt::Unchecked);layers_->setItem(row,col,item);}
         auto* color=new QTableWidgetItem("●");color->setForeground(l.color);layers_->setItem(row,3,color);layers_->setItem(row,4,new QTableWidgetItem(value(l.lineweight,2)));++row;}
     currentLayer_->setCurrentText(d.currentLayer);scope_->setCurrentText(d.layers.contains(scope)?scope:"全部可见图层");refreshing_=false;refreshProperties();
+    measurePanel_->setUnitNote(d.units==0?"图纸未声明单位：mm / mil 换算按 1 图形单位 = 1 mm。":QString());
 }
-void MainWindow::log(QString text){console_->append(text.toHtmlEscaped());statusBar()->showMessage(text,10000);}
+void MainWindow::log(QString text){
+    if(text.startsWith("DWG 引擎诊断：")&&text.size()>4000)text=text.left(4000)+"\n…诊断较长，界面仅显示前 4000 字符；完整诊断可用 --check-open 输出 JSON。";
+    console_->append(text.toHtmlEscaped());statusBar()->showMessage(text.section('\n',0,0).left(300),10000);
+}
 void MainWindow::error(QString text){log(text);QMessageBox::warning(this,"操作未完成",text);}
 void MainWindow::beginJob(CadCanvas* c,QString text){++activeJobs_;if(c)++jobsByCanvas_[c];log(text);refresh();}
 void MainWindow::endJob(CadCanvas* c){--activeJobs_;if(c&&--jobsByCanvas_[c]<=0)jobsByCanvas_.remove(c);refresh();}
@@ -154,7 +167,12 @@ void MainWindow::openPath(QString path) {
 }
 void MainWindow::saveFile(bool saveAs,std::function<void(bool)> completion) {
     auto* c=canvas();if(jobsByCanvas_.value(c)>0){log("当前文档仍有后台任务，请等待完成。");if(completion)completion(false);return;}
-    QString path=c->document->path;if(saveAs||path.isEmpty()){QString filter;path=QFileDialog::getSaveFileName(this,"保存图纸",path.isEmpty()?c->document->title+".dxf":path,"DXF (*.dxf);;DWG (*.dwg)",&filter);if(path.isEmpty()){if(completion)completion(false);return;}if(QFileInfo(path).suffix().isEmpty())path+=filter.startsWith("DWG")?".dwg":".dxf";}
+    QString path=c->document->path;
+    if(QFileInfo(path).suffix().compare("dwg",Qt::CaseInsensitive)==0&&io::DwgAdapter::findConverter(settings_.value("converter").toString()).isEmpty()) {
+        path=QFileInfo(path).dir().filePath(QFileInfo(path).completeBaseName()+".dxf");saveAs=true;
+        log("内置引擎仅用于 DWG 读取；请选择 DXF 保存位置，原 DWG 不会被覆盖。");
+    }
+    if(saveAs||path.isEmpty()){QString filter;path=QFileDialog::getSaveFileName(this,"保存图纸",path.isEmpty()?c->document->title+".dxf":path,"DXF (*.dxf);;DWG (*.dwg)",&filter);if(path.isEmpty()){if(completion)completion(false);return;}if(QFileInfo(path).suffix().isEmpty())path+=filter.startsWith("DWG")?".dwg":".dxf";}
     auto suffix=QFileInfo(path).suffix().toLower();if(suffix!="dxf"&&suffix!="dwg"){error("请使用 .dxf 或 .dwg 扩展名。");if(completion)completion(false);return;}
     // Value snapshot is implicitly shared by Qt; GUI remains editable during save.
     Document snapshot=*c->document;auto converter=settings_.value("converter").toString();QPointer<CadCanvas> guarded(c);beginJob(c,"后台保存："+path);
@@ -237,9 +255,10 @@ QVector<Entity> MainWindow::scopeEntities() const {
     auto* c=canvas();if(!c->selection.isEmpty())return c->document->selected(c->selection);QVector<Entity> result;for(const auto& e:c->document->entities)if(c->document->layers.value(e.layer).visible&&(scope_->currentIndex()==0||e.layer==scope_->currentText()))result.append(e);return result;
 }
 void MainWindow::runAnalysis(QString op) {
+    if(auto* dock=findChild<QDockWidget*>("PCB / FPC 工程分析")){dock->show();dock->raise();}
     auto* c=canvas();if(jobsByCanvas_.value(c)>0){log("当前文档的后台任务尚未完成。");return;}auto scope=scopeEntities();if(scope.isEmpty()){log("范围内没有对象。");return;}
     double first=0,second=0;bool ok=false;std::optional<Entity> board;
-    if(op=="板框"||op=="工艺边"){QVector<Entity> closed;for(const auto& e:scope)if(e.isClosed())closed.append(e);if(closed.size()!=1){error("请只选择一个闭合板框，或选择只包含一个板框的图层。");return;}board=closed[0];}
+    if(op=="板框"||op=="工艺边"){QVector<Entity> closed;for(const auto& e:scope)if(e.isClosed()&&e.kind!=Kind::SplinePreview)closed.append(e);if(closed.size()!=1){error("请只选择一个闭合板框，或选择只包含一个板框的图层。");return;}board=closed[0];}
     if(op=="间距"||op=="工艺边"){first=QInputDialog::getDouble(this,op,"最小要求 ("+c->document->unitName()+")",op=="间距"?0.2:3,0.000001,1e6,4,&ok);if(!ok)return;}
     if(op=="焊盘"){first=QInputDialog::getDouble(this,op,"最小宽度",1,0.000001,1e6,4,&ok);if(!ok)return;second=QInputDialog::getDouble(this,op,"最小高度",1,0.000001,1e6,4,&ok);if(!ok)return;}
     if(op=="工艺边"){scope.clear();for(const auto& e:c->document->entities)if(c->document->layers.value(e.layer).visible&&e.id!=board->id)scope.append(e);}
@@ -254,18 +273,15 @@ void MainWindow::runAnalysis(QString op) {
 }
 void MainWindow::executeCommand(QString text) {
     text=text.trimmed();if(text.isEmpty()){canvas()->finish();return;}log("> "+text);auto cmd=text.toUpper();
-    QMap<QString,Tool> aliases{{"L",Tool::Line},{"LINE",Tool::Line},{"PL",Tool::Polyline},{"PLINE",Tool::Polyline},{"REC",Tool::Rectangle},{"RECTANG",Tool::Rectangle},{"C",Tool::Circle},{"CIRCLE",Tool::Circle},{"ARC",Tool::Arc},{"ELLIPSE",Tool::Ellipse},{"TEXT",Tool::Text},{"M",Tool::Move},{"MOVE",Tool::Move},{"CO",Tool::Copy},{"COPY",Tool::Copy},{"MI",Tool::Mirror},{"MIRROR",Tool::Mirror},{"DI",Tool::Distance},{"DIST",Tool::Distance},{"ANGLE",Tool::Angle},{"ID",Tool::Coordinate},{"DIM",Tool::Dimension},{"DIMALIGNED",Tool::Dimension},{"SELECT",Tool::Select}};
+    QMap<QString,Tool> aliases{{"L",Tool::Line},{"LINE",Tool::Line},{"PL",Tool::Polyline},{"PLINE",Tool::Polyline},{"REC",Tool::Rectangle},{"RECTANG",Tool::Rectangle},{"C",Tool::Circle},{"CIRCLE",Tool::Circle},{"ARC",Tool::Arc},{"ELLIPSE",Tool::Ellipse},{"TEXT",Tool::Text},{"M",Tool::Move},{"MOVE",Tool::Move},{"CO",Tool::Copy},{"COPY",Tool::Copy},{"MI",Tool::Mirror},{"MIRROR",Tool::Mirror},{"DI",Tool::Distance},{"DIST",Tool::Distance},{"GAP",Tool::Gap},{"MEASURE",Tool::Gap},{"ANGLE",Tool::Angle},{"ID",Tool::Coordinate},{"DIM",Tool::Dimension},{"DIMALIGNED",Tool::Dimension},{"SELECT",Tool::Select}};
     if(cmd=="C"&&canvas()->tool()==Tool::Polyline){canvas()->finish(true);return;}if(aliases.contains(cmd)){canvas()->setTool(aliases[cmd]);return;}
     if(cmd=="UNDO"||cmd=="U"){undo_->trigger();return;}if(cmd=="REDO"){redo_->trigger();return;}if(cmd=="ERASE"||cmd=="E"){canvas()->deleteSelection();return;}
     if(cmd=="ZOOM"||cmd=="Z"||cmd=="EXTENTS"){canvas()->fitDrawing();return;}
     QMap<QString,QString> edits{{"OFFSET","偏移"},{"O","偏移"},{"ROTATE","旋转"},{"RO","旋转"},{"ARRAY","阵列"},{"TRIM","修剪"},{"TR","修剪"},{"EXTEND","延伸"},{"EX","延伸"},{"EXPLODE","分解"},{"X","分解"},{"JOIN","合并"},{"J","合并"}};
-    if(edits.contains(cmd)){editSelected(edits[cmd]);return;}if(cmd=="AREA"){for(const auto& e:canvas()->document->selected(canvas()->selection))log("面积 "+value(e.area())+" · 周长/长度 "+value(e.length()));return;}
+    if(edits.contains(cmd)){editSelected(edits[cmd]);return;}if(cmd=="AREA"){for(const auto& e:canvas()->document->selected(canvas()->selection)){if(e.kind==Kind::SplinePreview||e.kind==Kind::Hatch){log("只读预览填充或样条不支持面积/长度测量。");continue;}log("面积 "+value(e.area())+" · 周长/长度 "+value(e.length()));}return;}
     if(canvas()->tool()==Tool::Select||canvas()->tool()==Tool::Zoom){log("请先输入绘图或测量命令。");return;}
-    auto base=canvas()->inputPoints().isEmpty()?QPointF{}:canvas()->inputPoints().last();bool relative=text.startsWith('@');if(relative)text.remove(0,1);
-    auto parse=[](QString t){bool ok=false;double v=t.toDouble(&ok);if(!ok||!std::isfinite(v))throw std::runtime_error("无效数值");return v;};
-    try{QPointF point;if(text.contains(',')){auto parts=text.split(',');if(parts.size()!=2)throw std::runtime_error("无效坐标");point={parse(parts[0]),parse(parts[1])};if(relative)point+=base;}
-        else if(text.contains('<')){auto parts=text.split('<');if(parts.size()!=2)throw std::runtime_error("无效极坐标");double len=parse(parts[0]),theta=parse(parts[1])*geo::pi/180;point=base+QPointF(std::cos(theta),std::sin(theta))*len;}
-        else {double theta=geo::angle(base,canvas()->cursorPoint())*geo::pi/180;point=base+QPointF(std::cos(theta),std::sin(theta))*parse(text);}canvas()->acceptPoint(point);
-    }catch(const std::exception&){log("命令无效：支持 X,Y、@ΔX,ΔY、距离<角度。");}
+    auto base=canvas()->inputPoints().isEmpty()?QPointF{}:canvas()->inputPoints().last();
+    auto point=parseCommandPoint(text,base,canvas()->cursorPoint());
+    if(point)canvas()->acceptPoint(*point);else log("命令无效：支持 X,Y、@ΔX,ΔY、距离<角度。");
 }
 }

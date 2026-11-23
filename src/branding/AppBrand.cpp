@@ -25,21 +25,21 @@ QIcon AppBrand::icon() {
 
 QString AppBrand::styleSheet() {
     auto style = QString::fromUtf8(R"(
-QWidget {background:#18232e;color:#d9e5ee;font-family:'Microsoft YaHei','Segoe UI';font-size:12px;}
-QMenuBar,QToolBar{background:#1d2b38;border:none;spacing:4px;}
-QMenuBar::item{padding:7px 12px;} QMenu::item{padding:7px 22px;}
-QMenu::item:selected,QToolButton:hover,QPushButton:hover{background:#392e4e;}
-QToolButton{padding:7px;border-radius:4px;}
+QWidget {background:#161e29;color:#dce5f0;font-family:'Microsoft YaHei','Segoe UI';font-size:12px;}
+QMenuBar,QToolBar{background:#1b2532;border:none;spacing:3px;}
+QMenuBar::item{padding:5px 11px;} QMenu::item{padding:7px 22px;}
+QMenu::item:selected,QToolButton:hover,QPushButton:hover{background:#352d48;}
+QToolButton{padding:5px 8px;border-radius:5px;}
 QToolButton:checked{background:@SURFACE@;color:@LIGHT@;}
-QPushButton{background:#2d2941;border:1px solid #55436e;padding:7px 10px;border-radius:4px;}
-QLineEdit,QComboBox,QDoubleSpinBox{background:#101c26;border:1px solid #344d60;padding:6px;}
+QPushButton{background:#29283d;border:1px solid #4d4363;padding:6px 10px;border-radius:5px;}
+QLineEdit,QComboBox,QDoubleSpinBox{background:#111a25;border:1px solid #354455;padding:6px;border-radius:4px;}
 QLineEdit:focus,QComboBox:focus,QDoubleSpinBox:focus{border:1px solid @ACCENT@;}
 QTableWidget,QListWidget,QTextEdit{background:#121d27;border:1px solid #2d4253;selection-background-color:#4b3a67;}
 QHeaderView::section{background:#223342;padding:6px;border:none;}
-QDockWidget::title{background:#213240;padding:7px;font-weight:bold;}
-QTabWidget::pane{border:none;}QTabBar::tab{background:#1b2a37;padding:9px 17px;}
+QDockWidget::title{background:#1d2936;padding:6px;font-weight:bold;}
+QTabWidget::pane{border:none;}QTabBar::tab{background:#1b2532;padding:7px 15px;}
 QTabBar::tab:selected{background:#30273e;color:@LIGHT@;border-bottom:2px solid @ACCENT@;}
-QLabel#brand{color:@ACCENT@;font-size:16px;font-weight:bold;padding:5px 10px;}
+QLabel#brand{color:@ACCENT@;font-size:14px;font-weight:bold;padding:3px 8px;}
 QLabel#brandIcon{background:transparent;padding:3px;}
 )");
     style.replace("@ACCENT@", config::accent);

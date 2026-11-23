@@ -1,4 +1,5 @@
 #include "Entity.h"
+#include "Document.h"
 #include <cmath>
 #include <algorithm>
 
@@ -8,7 +9,8 @@ QString Entity::typeName() const {
     switch(kind) {
     case Kind::Line:return "直线"; case Kind::Polyline:return "多段线"; case Kind::Rectangle:return "矩形";
     case Kind::Circle:return "圆"; case Kind::Arc:return "圆弧"; case Kind::Ellipse:return "椭圆";
-    case Kind::Text:return "文字"; case Kind::Dimension:return "对齐标注";
+    case Kind::Text:return "文字"; case Kind::Dimension:return "对齐标注"; case Kind::Hatch:return "实心填充（只读）";
+    case Kind::SplinePreview:return "样条预览（只读，不用于测量）";
     } return {};
 }
 bool Entity::isClosed() const { return closed||kind==Kind::Circle; }
@@ -46,6 +48,15 @@ QVector<QPointF> Entity::outline(double tolerance,geo::TessellationStatus* statu
 }
 QRectF Entity::bounds() const {
     if(points.isEmpty()) return {};
+    if(kind==Kind::Hatch) {
+        QVector<QPointF> extrema;
+        for(qsizetype i=0;i<hatchLoops.size();++i) {
+            auto begin=hatchLoops[i],end=i+1<hatchLoops.size()?hatchLoops[i+1]:points.size();
+            Entity loop;loop.kind=Kind::Polyline;loop.closed=true;loop.points=points.mid(begin,end-begin);loop.bulges=bulges.mid(begin,end-begin);
+            auto b=loop.bounds();extrema+={b.topLeft(),b.bottomRight()};
+        }
+        return geo::bounds(extrema);
+    }
     if(kind==Kind::Circle) return QRectF(points[0]-QPointF(radius,radius),QSizeF(radius*2,radius*2));
     if(kind==Kind::Arc) {
         QVector<QPointF> extrema;
@@ -75,6 +86,7 @@ QRectF Entity::bounds() const {
     return geo::bounds(outline()).adjusted(-margin,-margin,margin,margin);
 }
 double Entity::length() const {
+    if(kind==Kind::Hatch||kind==Kind::SplinePreview)return 0;
     if(kind==Kind::Circle) return 2*geo::pi*radius;
     if(kind==Kind::Arc) return radius*std::abs(sweep)*geo::pi/180;
     if(kind==Kind::Polyline||kind==Kind::Rectangle) {
@@ -99,6 +111,7 @@ double Entity::area() const {
 }
 QVector<QPair<QPointF,QString>> Entity::snapPoints() const {
     QVector<QPair<QPointF,QString>> result;
+    if(kind==Kind::SplinePreview)return result;
     if(kind==Kind::Circle||kind==Kind::Arc||kind==Kind::Ellipse) {
         result.append({points[0],"圆心"});
         if(kind==Kind::Circle) for(auto d:QVector<QPointF>{{1,0},{-1,0},{0,1},{0,-1}}) result.append({points[0]+d*radius,"象限点"});
@@ -116,16 +129,18 @@ QVector<QPair<QPointF,QString>> Entity::snapPoints() const {
         }
     } return result;
 }
-QVector<QPair<QString,QString>> Entity::properties(const QString& unit) const {
+QVector<QPair<QString,QString>> Entity::properties(const Document& document) const {
+    QString unit=document.unitName();
+    auto dual=[&](double v){return document.dualLength(v);};
     QVector<QPair<QString,QString>> p{{"类型",typeName()},{"图层",layer},{"单位",unit}};
-    auto pos=[](QPointF v){ return value(v.x())+", "+value(v.y()); };
-    if(kind==Kind::Line) p+={{"起点",pos(points[0])},{"终点",pos(points[1])},{"长度",value(length())},{"角度 (°)",value(geo::angle(points[0],points[1]))}};
-    if(kind==Kind::Circle||kind==Kind::Arc) p+={{"圆心",pos(points[0])},{"半径",value(radius)},{"直径",value(radius*2)},{"周长 / 弧长",value(length())}};
-    if(kind==Kind::Polyline||kind==Kind::Rectangle) p+={{"顶点数",QString::number(points.size())},{"闭合",closed?"是":"否"},{"总长度",value(length())}};
+    auto pos=[&](QPointF v){ return value(v.x())+", "+value(v.y()); };
+    if(kind==Kind::Line) p+={{"起点",pos(points[0])},{"终点",pos(points[1])},{"长度",value(length())},{"长度 (mm/mil)",dual(length())},{"角度 (°)",value(geo::angle(points[0],points[1]))}};
+    if(kind==Kind::Circle||kind==Kind::Arc) p+={{"圆心",pos(points[0])},{"半径",value(radius)},{"直径",value(radius*2)},{"周长 / 弧长",value(length())},{"周长 / 弧长 (mm/mil)",dual(length())}};
+    if(kind==Kind::Polyline||kind==Kind::Rectangle) p+={{"顶点数",QString::number(points.size())},{"闭合",closed?"是":"否"},{"总长度",value(length())},{"总长度 (mm/mil)",dual(length())}};
     if(kind==Kind::Rectangle&&points.size()==4) p+={{"长",value(geo::length(points[0],points[1]))},{"宽",value(geo::length(points[1],points[2]))}};
     if(isClosed()) p.append({"面积",value(area())});
     if(kind==Kind::Text) p+={{"文字",text},{"高度",value(height)},{"位置",pos(points[0])}};
-    if(kind==Kind::Dimension) p+={{"距离",value(geo::length(points[0],points[1]))},{"标注文字",text}};
+    if(kind==Kind::Dimension) p+={{"距离",value(geo::length(points[0],points[1]))},{"距离 (mm/mil)",dual(geo::length(points[0],points[1]))},{"标注文字",text}};
     if(kind==Kind::Ellipse) p+={{"圆心",pos(points[0])},{"长半轴",value(geo::length({},points[1]))},{"短长轴比",value(ratio)}};
     return p;
 }

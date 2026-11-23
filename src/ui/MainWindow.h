@@ -8,6 +8,7 @@
 
 class QTabWidget;class QTableWidget;class QComboBox;class QListWidget;class QTextEdit;class QLineEdit;class QLabel;class QAction;
 namespace cad::ui {
+class MeasurePanel;
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
@@ -26,6 +27,7 @@ private:
     QTableWidget *properties_,*layers_;
     QComboBox *currentLayer_,*scope_;
     QListWidget* results_;
+    MeasurePanel* measurePanel_=nullptr;
     QTextEdit* console_;
     QLineEdit* command_;
     QLabel *coordinate_,*count_;

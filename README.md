@@ -30,12 +30,12 @@
 双击 **`package.bat`**，自动执行编译、测试、Qt 运行库部署、便携包、单文件 EXE 和安装 EXE 生成：
 
 ```text
-dist/CAD-0.2.2.exe                单文件便携 EXE，双击运行，无需安装
-dist/CAD-0.2.2-Setup.exe          单文件安装包，安装 CAD 并创建桌面/开始菜单快捷方式
-dist/CAD-0.2.2-Windows-x64.zip    便携包，完整解压后运行 CAD/CAD.exe
+dist/CAD-0.2.3.exe                单文件便携 EXE，双击运行，无需安装
+dist/CAD-0.2.3-Setup.exe          单文件安装包，安装 CAD 并创建桌面/开始菜单快捷方式
+dist/CAD-0.2.3-Windows-x64.zip    便携包，完整解压后运行 CAD/CAD.exe
 ```
 
-单文件 EXE 是自解压便携启动器，不写卸载记录、不建快捷方式；首次运行会把运行库解压到 `%LOCALAPPDATA%\Qiao\CAD-Portable\0.2.2`，之后直接复用。版本升级使用独立目录，不复用 0.2.1 的旧程序。
+单文件 EXE 是自解压便携启动器，不写卸载记录、不建快捷方式；首次运行会把运行库解压到 `%LOCALAPPDATA%\Qiao\CAD-Portable\0.2.3`，之后直接复用。版本升级使用独立目录，不复用旧版本程序。
 
 安装包包含全部必要 DLL，不要求目标机器安装 Python 或 Qt SDK。默认安装到当前用户 `%LOCALAPPDATA%\Programs\Qiao\CAD`，可在安装界面更改路径。从源码制作安装程序的完整步骤见 [如何将代码打包成安装程序](docs/如何将代码打包成安装程序.md) 和 [详细打包教程](docs/PACKAGING_TUTORIAL.md)。
 
@@ -62,7 +62,7 @@ CAD-Software/
 │   │   └── Editing.*          偏移、分解、合并、修剪/延伸
 │   ├── io/                    cad_io：文件适配
 │   │   ├── DxfAdapter.*       原生 ASCII DXF 读写、源记录保留
-│   │   └── DwgAdapter.*       ODA 外部 DWG 转换
+│   │   └── DwgAdapter.*       内置 LibreDWG 读取 / 可选 ODA 转换
 │   ├── engineering/           cad_engineering：专业分析
 │   │   └── Analysis.*         板框、孔径、间距、焊盘、工艺边、重复
 │   └── ui/                    cad_ui：Qt 桌面界面
@@ -85,6 +85,7 @@ CAD-Software/
 ```
 
 详细设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+代码职责、已完成的首阶段重构及后续计划见 [代码梳理与重构计划](docs/代码梳理与重构计划.md)。
 
 ## 已实现功能
 
@@ -144,18 +145,23 @@ LINE
 - 当前原生适配器显示/编辑二维 `LINE`、`LWPOLYLINE`、传统 `POLYLINE/VERTEX/SEQEND`、`CIRCLE`、`ARC`、`ELLIPSE`、基本左对齐 `TEXT` 和本软件创建的对齐 `DIMENSION`。
 - 多段线 bulge、起终宽度和常宽读写保留，画布/PDF 按宽度绘制；长度、面积和间距仍按中心轮廓计算。
 - 支持由上述二维对象组成的 `INSERT` 块展开，包括基点、平移、旋转、等比缩放/镜像、嵌套及行列阵列。无曲线且无宽度的折线/直线可非等比缩放。未编辑实例保留 INSERT，编辑后的实例输出为独立图元。
-- 含属性或不支持对象的块、非等比缩放曲线块、曲线拟合/网格 POLYLINE、外部 `DIMENSION`、`MTEXT`、`HATCH`、`SPLINE`、布局和 3D/非默认 OCS 对象当前**不显示/编辑**，保留源记录并在命令区提示。
+- 二维实心 `HATCH` 闭合多段线边界（包括 bulge 圆弧和多个环）、二维 `SOLID`/`TRACE` 可只读显示；支持有控制点、节点向量及可选正权重的 1–8 次二维 `SPLINE` 近似只读预览。预览保留原始源记录，不参与工程间距和工艺边计算；样条预览也不参与捕捉和长度测量。含不支持对象或只读预览的块尽可能部分显示，整块预览只读，保存时保留原始块引用。
+- 图案填充、边线式 HATCH 边界、部分 SPLINE（如周期样条、仅有拟合点）、非等比缩放曲线、曲线拟合/网格 POLYLINE、外部 `DIMENSION`、`MTEXT`、布局和 3D/非默认 OCS 对象当前**不完全显示/编辑**，保留源记录并在命令区提示。样条按每个节点区间固定采样，不能保证与原曲线的误差上界或中望 CAD 显示完全一致。
 - 新文档输出 R2010 ASCII DXF；二进制 DXF 暂不支持。Genesis/R12 传统多段线可直接读写，旧版新增图元采用传统记录，颜色使用 ACI；旧版文件新增椭圆/标注需转为新版文档。
 - 编辑源对象尽量保留句柄、线型、扩展数据；复制/分解产生的新对象主要继承几何、图层与颜色，非完整源属性复制。
 - 新文字限定为单行 TEXT；含换行的文字不能保存，避免破坏 DXF 记录。中文文字/图层使用 DXF Unicode 转义；显示使用系统字体，未实现 SHX 等价渲染。
 - DXF 保存使用 `QSaveFile` 原子提交；后台保存过程中继续编辑时，不会将未写入的更改标为已保存。
-- 真正的 DWG 读取/保存需要独立安装 [ODA File Converter](https://www.opendesign.com/guestfiles/oda_file_converter)。程序自动查找已配置路径、`CAD_ODA_CONVERTER` 环境变量、程序同目录/`oda`/`tools/oda`、PATH 和 Program Files 中的常见 ODA 安装目录；也可在“文件 → 配置 DWG 转换器”指定程序。转换在后台执行，输出 ACAD2018；临时文件使用固定英文名，避免中文及 `[` 等字符影响 ODA 的文件筛选。
-- 未找到转换器时，若 DWG 所在目录有同名 ASCII DXF，自动打开 **DXF 副本**，标题与命令区明确提示。此时文档保存路径为 DXF，不会覆盖原 DWG；无法保证 DXF 与 DWG 内容一致。转换器执行失败时不静默回退。没有同名 DXF 时仍需安装转换器，保存 DWG 始终需要转换器。转换器不随本软件打包。
+- **0.2.3 直接读取原始 DWG**：没有 ODA 时，自动调用随包提供的 GNU LibreDWG 0.14 `dwg2dxf.exe`，不依赖 Python，不自动改读同名 DXF。识别 R11/R12、R13、R14、2000、2004、2007、2010、2013、2018 系列文件头；跨软件兼容取决于标准 DWG 格式和对象类型，并非按软件名称过滤。转换后的 ASCII DXF 由现有二维适配器显示，专有代理对象、3D、布局及不支持图元不能保证完整。引擎诊断在命令区报告，转换/解析失败明确报错。
+- 已配置或自动找到 [ODA File Converter](https://www.opendesign.com/guestfiles/oda_file_converter) 时优先使用 ODA；查找已配置路径、`CAD_ODA_CONVERTER`、程序附近目录、PATH 和 Program Files 中的常见安装目录。ODA 不随包分发，保存 DWG 仍需 ODA，输出 ACAD2018。没有 ODA 时“保存”自动进入 DXF 另存为，保留原 DWG。转换中间数据不保证无损保留原 DWG，因此建议始终保留原图备份。
+- LibreDWG 在独立进程中运行，临时文件参数为固定英文相对名，支持中文用户目录及方括号文件名。可用 `CAD_LIBREDWG_READER` 指定其他 `dwg2dxf.exe`；该变量存在但为空/无效时不会自动使用内置引擎。转换可取消、超时 120 秒，输入和输出受大小限制，损坏文件/未知文件头明确报错。
+- 构建/打包脚本自动下载并校验固定版本 LibreDWG 官方发行物，缓存于 `build/dependencies`。完整对应源码、GPLv3 许可证与声明随程序放在 `tools/libredwg`；首次构建需联网，后续可使用已校验缓存。手工 CMake 部署时也需运行 `scripts/prepare-dwg-reader.ps1 -Destination <程序目录>/tools/libredwg`。
 - DXF 默认限制 256 MiB、200 万条记录、400 万组码、单个多段线 100 万个顶点、块展开 200 万对象及 32 层嵌套；后台打开时可取消，开发接口可调整限制。
 
 ## 构建与测试
 
 本机双击 **`build.bat`** 即完成 Release 编译、CTest 和 Qt DLL 部署。
+
+大图离屏读取、索引、绘制、平移/缩放和峰值内存的可重复测试及本机参考结果见 [大图性能基准](docs/大图性能基准.md)。
 
 也可执行：
 
@@ -200,6 +206,14 @@ windeployqt --release --compiler-runtime build/native/bin/CAD.exe
 ```
 
 该脚本不验证所有块、布局、文字和扩展属性的完整性；这些仍需配合专业 CAD 阅读器和样本矩阵检查。
+
+运行真实多版本 DWG 的打开矩阵（上游源码附带样本，包含 AC1009–AC1032 九代格式；可在末尾追加生产图纸）：
+
+```powershell
+.\.venv\Scripts\python.exe tests/native/DwgReadMatrix.py build/native/bin/CAD.exe build/dependencies/libredwg-0.14/source/libredwg-0.14/test/test-data build/native/dwg-matrix "D:\图纸\board.dwg"
+```
+
+矩阵检查实际载入路径仍为 DWG、使用真实读取引擎、源文件哈希不变，并记录可显示对象数。AC1009 上游样本带非零 Z，现有二维渲染器不投影这类图形，单独标记为 `not-rendered`，不算显示成功。其余二维样本必须有可显示对象；不等价于所有厂商/专有对象的完整性验收。
 
 检查实际界面后台打开流程并输出 JSON 报告和截图（失败返回非零退出码）：
 

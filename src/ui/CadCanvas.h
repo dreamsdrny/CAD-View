@@ -1,11 +1,12 @@
 #pragma once
 #include "core/SpatialIndex.h"
+#include "core/Measure.h"
 #include <QWidget>
 #include <QPainterPath>
 #include <memory>
 
 namespace cad::ui {
-enum class Tool {Select,Line,Polyline,Rectangle,Circle,Arc,Ellipse,Text,Move,Copy,Mirror,Distance,Horizontal,Vertical,Continuous,Angle,Coordinate,Dimension,Zoom};
+enum class Tool {Select,Line,Polyline,Rectangle,Circle,Arc,Ellipse,Text,Move,Copy,Mirror,Distance,Gap,Horizontal,Vertical,Continuous,Angle,Coordinate,Dimension,Zoom};
 class CadCanvas : public QWidget {
     Q_OBJECT
 public:
@@ -28,13 +29,20 @@ public:
     void centerOnSelection();
     void renderDocument(QPainter& painter,QRectF target,bool darkBackground=false);
     static QString toolName(Tool tool);
-    static QPainterPath pathFor(const Entity& entity);
+    // document=nullptr keeps the legacy single-unit label; otherwise dimension
+    // labels carry a dual mm / mil readout.
+    static QPainterPath pathFor(const Entity& entity, const Document* document = nullptr);
 signals:
     void documentChanged();
     void selectionChanged();
     void message(QString text);
     void coordinates(QPointF point);
     void toolChanged();
+    // Live values while picking points or objects (dual-unit text).
+    void liveMeasure(QString text);
+    // Completed measurement: text includes kind and dual-unit values, ids locate
+    // the involved objects in the drawing.
+    void measured(QString text, QVector<EntityId> ids);
 protected:
     void paintEvent(QPaintEvent*) override;
     void wheelEvent(QWheelEvent*) override;
@@ -43,7 +51,7 @@ protected:
     void mouseReleaseEvent(QMouseEvent*) override;
     void keyPressEvent(QKeyEvent*) override;
 private:
-    struct Cached {Entity entity;QPainterPath path;};
+    struct Cached {Entity entity;QPainterPath path;bool pathReady=false;};
     QHash<EntityId,Cached> cache_;
     SpatialIndex index_;
     Tool tool_=Tool::Select;
@@ -53,8 +61,14 @@ private:
     bool panning_=false,dragging_=false,hasCursor_=false;
     QPointF lastPan_,dragStart_,dragEnd_;
     std::optional<QPair<QPointF,QString>> snapPoint_;
+    EntityId gapFirst_=0, gapHover_=0;
+    std::optional<measure::Gap> gapPreview_;
     QTransform viewTransform() const;
+    const QPainterPath& cachedPath(EntityId id);
     QPointF constrained(QPointF point);
-    void add(Entity entity);
+    EntityId add(Entity entity);
+    EntityId pickEntity(QPointF modelPosition, bool measurableOnly = false);
+    void pickForGap(QPointF modelPosition);
+    QString gapReport(const Entity& first, const Entity& second, const measure::Gap& result) const;
 };
 }
