@@ -1,4 +1,4 @@
-add_library(cad_ui STATIC CadCanvas.cpp CommandParser.cpp MainWindow.cpp MeasurePanel.cpp)
+add_library(cad_ui STATIC CadCanvas.cpp CommandParser.cpp MainWindow.cpp MeasurePanel.cpp RecoveryManager.cpp PanelizationDialog.cpp)
 target_link_libraries(cad_ui PUBLIC cad_core cad_io cad_engineering cad_branding Qt6::Widgets Qt6::Concurrent Qt6::PrintSupport)
 add_executable(CAD WIN32 main.cpp ${CAD_WINDOWS_RESOURCE})
 add_dependencies(CAD cad_brand_assets)

@@ -20,6 +20,15 @@ struct Entity {
     double constantWidth=0;
     double radius=0, start=0, sweep=90, ratio=0.5, height=2.5, rotation=0;
     QString text;
+    int dimensionFormat=0; // 0 legacy mm/mil, 1 millimetres (panel drawing)
+    int dimensionPrecision=3;
+    // A top-level external dimension label permits text-only editing, not geometry editing.
+    QString dimensionTextKey, dimensionTextOverride, dimensionAutoText;
+    double textWidthFactor=1;
+    double textBoxWidth=0; // MTEXT wrapping width in drawing units; 0 = unbounded
+    double textLineSpacing=1;
+    int textHorizontal=0; // 0 left, 1 center, 2 right
+    int textVertical=0; // 0 baseline, 1 bottom, 2 middle, 3 top
     bool closed=false;
     bool readOnly=false; // Preview geometry that cannot safely replace its source record.
     QString sourceKey; // immutable source record identity; copies get a new identity

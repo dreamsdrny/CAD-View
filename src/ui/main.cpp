@@ -35,7 +35,7 @@ int main(int argc,char** argv) {
             return 0;
         }catch(const std::exception& e){QTextStream(stderr)<<"DWG roundtrip failed: "<<QString::fromUtf8(e.what())<<Qt::endl;return 1;}
     }
-    cad::ui::MainWindow window(!arguments.contains("--check-open"));window.show();
+    cad::ui::MainWindow window(false);window.show();
     if((arguments.size()==4||arguments.size()==5)&&arguments[1]=="--check-open") {
         window.setProperty("checkOpen",true);
         bool finished=false;
@@ -43,10 +43,12 @@ int main(int argc,char** argv) {
             if(finished)return;
             finished=true;
             const auto& d=*window.canvas()->document;auto bounds=d.bounds();
+            int visibleEntities=0;for(const auto& e:d.entities)if(d.layers.value(e.layer).visible)++visibleEntities;
             QJsonObject result{{"success",error.isEmpty()},{"requestedPath",arguments[2]},{"loadedPath",d.path},
                 {"title",d.title},{"entities",int(d.entities.size())},{"layers",int(d.layers.size())},
                 {"warnings",QJsonArray::fromStringList(d.warnings)},{"error",error},
-                {"hasDisplayableEntities",error.isEmpty()&&!d.entities.isEmpty()},
+                {"hasDisplayableEntities",error.isEmpty()&&visibleEntities>0},{"visibleEntities",visibleEntities},
+                {"displayStatus",!error.isEmpty()?"failed":d.entities.isEmpty()?"no-supported-model-entities":visibleEntities==0?"all-layers-hidden":"displayable"},
                 {"bounds",QJsonArray{bounds.x(),bounds.y(),bounds.width(),bounds.height()}}};
             if(error.isEmpty()&&arguments.size()==5) {
                 window.canvas()->fitDrawing();
@@ -65,6 +67,9 @@ int main(int argc,char** argv) {
     if(arguments.size()==3&&arguments[1]=="--screenshot")QTimer::singleShot(300,&app,[&]{window.grab().save(arguments[2]);app.quit();});
     else if(arguments.contains("--smoke-test"))QTimer::singleShot(800,&app,&QApplication::quit);
     else if(arguments.size()>1)window.openPath(arguments[1]);
-    if(!arguments.contains("--smoke-test")&&!arguments.contains("--screenshot"))window.showStartupTutorial(true);
+    if(!arguments.contains("--smoke-test")&&!arguments.contains("--screenshot")) {
+        window.showRecoveryDialog(true);
+        window.showStartupTutorial(true);
+    }
     return app.exec();
 }

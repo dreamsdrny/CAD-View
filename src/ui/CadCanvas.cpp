@@ -1,6 +1,8 @@
 #include "CadCanvas.h"
 #include "branding/AppBrand.h"
 #include "core/Editing.h"
+#include "core/TextLayout.h"
+#include "core/DimensionLayout.h"
 #include <QPainter>
 #include <QPainterPathStroker>
 #include <QMouseEvent>
@@ -13,9 +15,20 @@
 #include <limits>
 
 namespace cad::ui {
+namespace {
+QPainterPath textHitArea(const Entity& e,const QPainterPath& glyphs) {
+    // Hit-test the oriented label rectangle, including spaces and holes inside glyphs.
+    // Undo rotation before computing bounds to avoid an oversized box for diagonal text.
+    QTransform rotation;rotation.translate(e.points[0].x(),e.points[0].y());rotation.rotate(e.rotation);rotation.translate(-e.points[0].x(),-e.points[0].y());
+    QPainterPath rectangle;rectangle.addRect(rotation.inverted().map(glyphs).boundingRect());
+    return rotation.map(rectangle);
+}
+}
 CadCanvas::CadCanvas(std::shared_ptr<Document> d,QWidget* parent):QWidget(parent),document(std::move(d)) {
     qRegisterMetaType<QVector<EntityId>>();
-    setMouseTracking(true);setFocusPolicy(Qt::StrongFocus);setMinimumSize(320,240);synchronize();
+    setMouseTracking(true);setFocusPolicy(Qt::StrongFocus);setMinimumSize(320,240);
+    setToolTip("方向键移动图纸 · Shift 加速 · Ctrl 微调 · + / - 缩放 · 滚轮缩放 · 中键拖动平移 · Home 显示全部");
+    synchronize();
 }
 QTransform CadCanvas::viewTransform() const {
     QTransform t;t.translate(width()/2.,height()/2.);t.scale(scale_,-scale_);t.translate(-center_.x(),-center_.y());return t;
@@ -34,12 +47,9 @@ QPainterPath CadCanvas::pathFor(const Entity& e, const Document* document) {
         }
         return path;
     }
-    if(e.kind==Kind::Text) {
-        QFont font("Microsoft YaHei");font.setPixelSize(100);QPainterPath raw;
-        auto lines=e.text.split('\n');for(qsizetype i=0;i<lines.size();++i)raw.addText(0,i*130,font,lines[i]);
-        QTransform t;t.translate(e.points[0].x(),e.points[0].y());t.rotate(e.rotation);t.scale(e.height/100,-e.height/100);return t.map(raw);
-    }
+    if(e.kind==Kind::Text)return text::path(e);
     if(e.kind==Kind::Dimension) {
+        if(e.dimensionFormat==1){for(const auto& part:dimension::graphics(e,document?document->units:4))path.addPath(pathFor(part,document));return path;}
         auto a=e.points[0],b=e.points[1],c=e.points[2],delta=c-geo::project(c,a,b,false),aa=a+delta,bb=b+delta;
         auto line=[&](QPointF p,QPointF q){path.moveTo(p);path.lineTo(q);};line(a,aa);line(b,bb);line(aa,bb);
         double len=geo::length(a,b);if(len>geo::epsilon){auto u=(b-a)/len;double size=std::min(1.,len/10);
@@ -93,7 +103,12 @@ void CadCanvas::synchronize() {
     index_.rebuild(*document);update();emit selectionChanged();
 }
 const QPainterPath& CadCanvas::cachedPath(EntityId id) {
-    auto it=cache_.find(id);Q_ASSERT(it!=cache_.end());
+    auto it=cache_.find(id);
+    if(it==cache_.end()) {
+        auto entity=document->entities.constFind(id);
+        if(entity==document->entities.constEnd()){static const QPainterPath empty;return empty;}
+        it=cache_.insert(id,{entity.value(),{},false});
+    }
     // Dimensions re-render every paint so the mm/mil label always matches current units.
     if(it->entity.kind==Kind::Dimension){it->path=pathFor(it->entity,document.get());return it->path;}
     if(!it->pathReady){it->path=pathFor(it->entity,document.get());it->pathReady=true;}
@@ -101,6 +116,24 @@ const QPainterPath& CadCanvas::cachedPath(EntityId id) {
 }
 void CadCanvas::fitDrawing() {
     auto b=document->bounds();center_=b.center();scale_=std::clamp(std::min(width()/std::max(10.,b.width()),height()/std::max(10.,b.height()))*0.85,1e-5,1e5);update();
+}
+void CadCanvas::panByPixels(QPointF delta) {
+    if(delta.isNull())return;
+    // Screen Y is inverted, so moving the sheet down increases center_.y.
+    center_+=QPointF(-delta.x()/scale_,delta.y()/scale_);
+    refreshCursorFromMouse();update();
+}
+void CadCanvas::zoomBy(double factor) {
+    if(!(factor>0))return;
+    auto anchor=hasMouseScreen_?lastMouseScreen_:QPointF(width()/2.,height()/2.);
+    auto before=modelAt(anchor);
+    scale_=std::clamp(scale_*factor,1e-5,1e5);
+    center_+=before-modelAt(anchor);
+    refreshCursorFromMouse();update();
+}
+void CadCanvas::refreshCursorFromMouse() {
+    if(!hasCursor_||!hasMouseScreen_)return;
+    cursor_=constrained(modelAt(lastMouseScreen_));emit coordinates(cursor_);
 }
 QString CadCanvas::toolName(Tool tool) {
     switch(tool){case Tool::Select:return "选择";case Tool::Line:return "直线";case Tool::Polyline:return "多段线";
@@ -152,23 +185,41 @@ QPointF CadCanvas::constrained(QPointF p) {
 EntityId CadCanvas::add(Entity e) {
     auto l=document->layers.value(document->currentLayer);
     if(l.locked||!l.visible){emit message("当前图层已锁定或隐藏，请切换图层。");points_.clear();return 0;}
-    e.layer=document->currentLayer;document->commit("绘制 "+e.typeName(),{},{e});synchronize();emit documentChanged();
-    return e.id;
+    e.layer=document->currentLayer;
+    // commit() assigns ids to its own copies, so take the id from its return value
+    // instead of the local entity (which stays 0).
+    auto ids=document->commit("绘制 "+e.typeName(),{},{e});synchronize();emit documentChanged();
+    return ids.isEmpty()?0:ids.first();
 }
 EntityId CadCanvas::pickEntity(QPointF position, bool measurableOnly) {
     double tolerance=7/scale_;
     auto candidates=index_.query(QRectF(position-QPointF(tolerance,tolerance),QSizeF(2*tolerance,2*tolerance)));
     EntityId bestId=0;double best=std::numeric_limits<double>::infinity();
+    bool bestText=false;
     QPainterPathStroker stroker;stroker.setWidth(tolerance*2);
     for(auto id:candidates){
         if(measurableOnly&&!measure::measurable(document->entities.value(id)))continue;
-        const auto& path=cachedPath(id);
-        if(stroker.createStroke(path).contains(position)||path.contains(position)){
-            auto b=document->entities.value(id).bounds();double score=b.width()*b.height();
-            if(score<best){best=score;bestId=id;}
+        const auto& path=cachedPath(id);const auto& entity=document->entities.value(id);
+        bool editableText=!measurableOnly&&entity.kind==Kind::Text&&document->textEditable(id);
+        auto hit=!measurableOnly&&entity.kind==Kind::Text?textHitArea(entity,path):path;
+        if(stroker.createStroke(hit).contains(position)||hit.contains(position)){
+            auto b=entity.bounds();double score=b.width()*b.height();
+            if((editableText&&!bestText)||(editableText==bestText&&score<best)){best=score;bestId=id;bestText=editableText;}
         }
     }
     return bestId;
+}
+EntityId CadCanvas::pickTextForEditing(QPointF position) {
+    auto id=pickEntity(position);
+    if(!id)return 0;
+    if(document->textEditable(id))return id;
+    // A dimension's lines/arrows and its label share the same source root.
+    // Double-clicking that dimension can open the label editor without exploding it.
+    auto root=document->entities.value(id).sourceKey.section('/',0,0);
+    if(root.isEmpty())return 0;
+    for(const auto& e:document->entities)
+        if(e.dimensionTextKey==root&&document->textEditable(e.id))return e.id;
+    return 0;
 }
 QString CadCanvas::gapReport(const Entity& first, const Entity& second, const measure::Gap& result) const {
     bool bothRound=(first.kind==Kind::Circle||first.kind==Kind::Arc)&&(second.kind==Kind::Circle||second.kind==Kind::Arc);
@@ -246,8 +297,10 @@ void CadCanvas::finish(bool closed) {
     setTool(Tool::Select);
 }
 void CadCanvas::deleteSelection() {
-    auto before=document->selected(selection,true);if(before.isEmpty()){emit message("没有可删除的对象。");return;}
-    document->commit("删除",before,{});selection.clear();synchronize();emit documentChanged();
+    if(selection.isEmpty()){emit message("未选中图形：先按 Esc 返回选择，框选或点选后再删除。右→左交叉框选可删除相交的白色图框/线条；网格和坐标轴不是图纸对象。");return;}
+    auto before=document->deletionTargets(selection);if(before.isEmpty()){emit message("没有可删除的对象：请先选择内容；锁定图层需先解锁。");return;}
+    auto count=before.size();document->deleteEntities(selection);selection.clear();synchronize();emit documentChanged();
+    emit message(QString("已删除 %1 个显示对象；外部标注 / 只读块按完整实例删除，Ctrl+Z 可撤销。").arg(count));
 }
 void CadCanvas::selectIds(QSet<EntityId> ids){selection=std::move(ids);emit selectionChanged();update();}
 void CadCanvas::centerOnSelection(){QVector<QPointF> pts;for(const auto& e:document->selected(selection)){auto b=e.bounds();pts+={b.topLeft(),b.bottomRight()};}if(!pts.isEmpty()){center_=geo::bounds(pts).center();update();}}
@@ -255,11 +308,22 @@ void CadCanvas::paintEvent(QPaintEvent*) {
     QPainter p(this);p.fillRect(rect(),QColor("#101922"));p.setRenderHint(QPainter::Antialiasing);p.setTransform(viewTransform());
     auto world=QRectF(modelAt({0.,double(height())}),modelAt({double(width()),0.})).normalized();
     if(grid){double step=std::pow(10,std::floor(std::log10(35/scale_)));if(step*scale_<18)step*=5;QPen pen(QColor("#22303e"));pen.setCosmetic(true);p.setPen(pen);
-        for(double x=std::floor(world.left()/step)*step;x<world.right();x+=step)p.drawLine(QPointF(x,world.top()),QPointF(x,world.bottom()));
-        for(double y=std::floor(world.top()/step)*step;y<world.bottom();y+=step)p.drawLine(QPointF(world.left(),y),QPointF(world.right(),y));}
+        // Draw by integer index instead of accumulating the step: at very large
+        // coordinates value+step can round back to value and stall forever.
+        auto drawGrid=[&](bool vertical) {
+            double begin=vertical?world.left():world.top(),end=vertical?world.right():world.bottom();
+            if(!std::isfinite(begin)||!std::isfinite(end)||!(step>0)||begin>=end)return;
+            double first=std::floor(begin/step),count=std::ceil(end/step)-first;
+            if(!std::isfinite(first)||!(count>=0)||count>100000)return;
+            for(qint64 i=0;i<=qint64(count);++i){double value=(first+i)*step;if(!std::isfinite(value))break;
+                if(vertical)p.drawLine(QPointF(value,world.top()),QPointF(value,world.bottom()));
+                else p.drawLine(QPointF(world.left(),value),QPointF(world.right(),value));}
+        };
+        drawGrid(true);drawGrid(false);}
     QPen axis(QColor("#3a5265"));axis.setCosmetic(true);p.setPen(axis);p.drawLine(QPointF(0,world.top()),QPointF(0,world.bottom()));p.drawLine(QPointF(world.left(),0),QPointF(world.right(),0));
     auto visible=index_.query(world);std::sort(visible.begin(),visible.end());
-    for(auto id:visible){const auto& path=cachedPath(id);const auto& e=cache_.constFind(id)->entity;auto layer=document->layers.value(e.layer);
+    for(auto id:visible){auto entity=document->entities.constFind(id);if(entity==document->entities.constEnd())continue;
+        const auto& path=cachedPath(id);const auto& e=entity.value();auto layer=document->layers.value(e.layer);
         QPen pen(selection.contains(id)?QColor("#f4c66c"):(e.color.isValid()?e.color:layer.color),std::clamp(layer.lineweight*4,1.,3.)+(selection.contains(id)?1:0));pen.setCosmetic(true);p.setPen(pen);
         p.setBrush(e.kind==Kind::Text||e.kind==Kind::Hatch||e.maximumWidth()>0?QBrush(pen.color()):QBrush(Qt::NoBrush));p.drawPath(path);}
     QPen preview(branding::AppBrand::accent(),1.4,Qt::DashLine);preview.setCosmetic(true);p.setPen(preview);p.setBrush(Qt::NoBrush);
@@ -296,12 +360,20 @@ void CadCanvas::wheelEvent(QWheelEvent* e) {
     auto before=modelAt(e->position());scale_=std::clamp(scale_*(e->angleDelta().y()>0?1.2:1/1.2),1e-5,1e5);center_+=before-modelAt(e->position());update();e->accept();
 }
 void CadCanvas::mousePressEvent(QMouseEvent* e) {
-    setFocus();if(e->button()==Qt::MiddleButton){panning_=true;lastPan_=e->position();setCursor(Qt::ClosedHandCursor);}
+    setFocus();lastMouseScreen_=e->position();hasMouseScreen_=true;
+    if(e->button()==Qt::MiddleButton){panning_=true;lastPan_=e->position();setCursor(Qt::ClosedHandCursor);}
     else if(e->button()==Qt::RightButton)finish();
     else if(e->button()==Qt::LeftButton){if(tool_==Tool::Select||tool_==Tool::Zoom){dragging_=true;dragStart_=dragEnd_=e->position();}else if(tool_==Tool::Gap)pickForGap(modelAt(e->position()));else acceptPoint(constrained(modelAt(e->position())));}
     update();
 }
+void CadCanvas::mouseDoubleClickEvent(QMouseEvent* e) {
+    if(e->button()!=Qt::LeftButton||tool_!=Tool::Select){QWidget::mouseDoubleClickEvent(e);return;}
+    dragging_=false;auto id=pickTextForEditing(modelAt(e->position()));
+    if(id){selectIds({id});emit textEditRequested();}
+    e->accept();update();
+}
 void CadCanvas::mouseMoveEvent(QMouseEvent* e) {
+    lastMouseScreen_=e->position();hasMouseScreen_=true;
     if(panning_){center_+=modelAt(lastPan_)-modelAt(e->position());lastPan_=e->position();}
     if(dragging_)dragEnd_=e->position();
     hasCursor_=true;cursor_=constrained(modelAt(e->position()));emit coordinates(cursor_);
@@ -329,14 +401,35 @@ void CadCanvas::mouseReleaseEvent(QMouseEvent* e) {
         else {bool shift=e->modifiers().testFlag(Qt::ShiftModifier);QSet<EntityId> ids=shift?selection:QSet<EntityId>{};
             if(geo::length(dragStart_,end)<5){auto bestId=pickEntity(modelAt(end));
                 if(bestId){if(shift&&ids.contains(bestId))ids.remove(bestId);else ids.insert(bestId);}
-            }else for(auto id:index_.query(box)){bool crossing=end.x()<dragStart_.x();const auto& path=cachedPath(id);
-                if(crossing?(path.intersects(box)||box.contains(path.boundingRect())):box.contains(path.boundingRect()))ids.insert(id);}
+            }else {
+                bool crossing=end.x()<dragStart_.x();double tolerance=1.5/scale_;
+                QPainterPathStroker stroker;stroker.setWidth(2*tolerance);
+                for(auto id:index_.query(box.adjusted(-tolerance,-tolerance,tolerance,tolerance))) {
+                    const auto& path=cachedPath(id);auto b=path.boundingRect();
+                    // QRectF::contains(QRectF) rejects zero-width/height bounds.
+                    // Horizontal/vertical open lines must be selected by coordinates,
+                    // and crossing selection must intersect the stroke, not a fill.
+                    bool contained=b.left()>=box.left()-geo::epsilon&&b.right()<=box.right()+geo::epsilon
+                        &&b.top()>=box.top()-geo::epsilon&&b.bottom()<=box.bottom()+geo::epsilon;
+                    bool hit=contained;
+                    if(crossing&&!hit)hit=path.intersects(box)||stroker.createStroke(path).intersects(box);
+                    if(crossing&&!hit&&document->entities.value(id).kind==Kind::Text)hit=textHitArea(document->entities.value(id),path).intersects(box);
+                    if(hit)ids.insert(id);
+                }
+            }
             selectIds(ids);
         }
     }update();
 }
 void CadCanvas::keyPressEvent(QKeyEvent* e) {
-    if(e->key()==Qt::Key_Escape)setTool(Tool::Select);
+    double step=e->modifiers().testFlag(Qt::ShiftModifier)?240.:e->modifiers().testFlag(Qt::ControlModifier)?12.:48.;
+    if(e->key()==Qt::Key_Left){panByPixels({-step,0});e->accept();}
+    else if(e->key()==Qt::Key_Right){panByPixels({step,0});e->accept();}
+    else if(e->key()==Qt::Key_Up){panByPixels({0,-step});e->accept();}
+    else if(e->key()==Qt::Key_Down){panByPixels({0,step});e->accept();}
+    else if(e->key()==Qt::Key_Plus||e->key()==Qt::Key_Equal){zoomBy(1.2);e->accept();}
+    else if(e->key()==Qt::Key_Minus){zoomBy(1/1.2);e->accept();}
+    else if(e->key()==Qt::Key_Escape)setTool(Tool::Select);
     else if(e->key()==Qt::Key_Return||e->key()==Qt::Key_Enter)finish();
     else if(e->key()==Qt::Key_C&&tool_==Tool::Polyline)finish(true);
     else if(e->key()==Qt::Key_Delete)deleteSelection();else QWidget::keyPressEvent(e);

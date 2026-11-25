@@ -42,9 +42,18 @@ FunctionEnd
 Section "CAD Portable"
     SetShellVarContext current
     SetOutPath "$INSTDIR"
-    ; Reuse an already extracted copy; this folder only contains this version.
-    IfFileExists "$INSTDIR\CAD.exe" launch
+    ; Reuse only a complete extraction of the same version. A version marker
+    ; prevents a rebuilt installer from launching stale binaries/plugins.
+    IfFileExists "$INSTDIR\payload.version" 0 extract
+    FileOpen $0 "$INSTDIR\payload.version" r
+    FileRead $0 $1
+    FileClose $0
+    StrCmp $1 "${VERSION}" launch
+extract:
     File /r "${INPUT_DIR}\*.*"
+    FileOpen $0 "$INSTDIR\payload.version" w
+    FileWrite $0 "${VERSION}"
+    FileClose $0
 launch:
     ; Forward drag-and-drop or command-line file paths to the real application.
     ExecWait '"$INSTDIR\CAD.exe" $Parameters' $0

@@ -2,6 +2,7 @@ param(
     [string]$QtRoot = '',
     [string]$CompilerRoot = '',
     [string]$NsisRoot = '',
+    [string]$BuildDirectory = '',
     [switch]$SkipBuild,
     [switch]$PortableOnly,
     [switch]$SingleExe
@@ -19,10 +20,11 @@ if ($needsNsis -and -not (Test-Path -LiteralPath "$NsisRoot\makensis.exe")) {
     throw 'NSIS missing. Install NSIS 3 and pass -NsisRoot, or place it under .toolchain\nsis.'
 }
 if (-not $SkipBuild) {
+    if ($BuildDirectory) { throw 'For an alternate build directory, build and test it first and use -SkipBuild.' }
     & "$PSScriptRoot\build-native.ps1" -QtRoot $QtRoot -CompilerRoot $CompilerRoot
 }
 $env:PATH = "$CompilerRoot\bin;$QtRoot\bin;$env:PATH"
-$build = Join-Path $root 'build\native'
+$build = if ($BuildDirectory) { [System.IO.Path]::GetFullPath($BuildDirectory) } else { Join-Path $root 'build\native' }
 if (-not (Test-Path -LiteralPath "$build\bin\CAD.exe")) { throw 'CAD.exe is missing. Build first.' }
 $cache = Get-Content -LiteralPath "$build\CMakeCache.txt"
 $versionLine = $cache | Where-Object { $_ -match '^CMAKE_PROJECT_VERSION:STATIC=' }
@@ -63,3 +65,8 @@ Write-Host "Portable package: $archive"
 if ($single) { Write-Host "Single-file portable executable: $single" }
 if ($needsNsis -and -not $SingleExe) { Write-Host "Setup executable: $setup" }
 Write-Host "Staged application: $stageRoot\CAD.exe"
+
+# Reaching this point means every verification above succeeded. Exit explicitly
+# so a benign stderr warning from a native helper (for example windeployqt's
+# missing-translations notice) cannot make CI report a failed package.
+exit 0

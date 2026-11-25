@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(CAD VERSION 0.2.3 LANGUAGES CXX)
+project(CAD VERSION 0.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -24,4 +24,4 @@ add_subdirectory(src/ui)
 add_subdirectory(tests/native)
 
 install(TARGETS CAD RUNTIME DESTINATION .)
-install(FILES README.md docs/USER_GUIDE.md DESTINATION docs)
+install(FILES README.md docs/使用教程.md docs/USER_GUIDE.md docs/PANELIZATION.md docs/FPC_MATERIAL_PLANNING.md docs/RELEASE_NOTES_0.3.0.md DESTINATION docs)

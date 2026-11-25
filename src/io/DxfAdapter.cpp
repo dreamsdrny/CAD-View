@@ -1,4 +1,5 @@
 #include "DxfAdapter.h"
+#include "core/DimensionLayout.h"
 #include <QFile>
 #include <QFileInfo>
 #include <QSaveFile>
@@ -8,6 +9,14 @@
 #include <stdexcept>
 #include <limits>
 #include <QRegularExpression>
+#include <QStringDecoder>
+#include <QCryptographicHash>
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace cad::io {
 namespace {
@@ -22,6 +31,20 @@ QString string(const QByteArray& raw) {
     auto matches=escape.globalMatch(text);QVector<QRegularExpressionMatch> replacements;
     while(matches.hasNext())replacements.append(matches.next());
     for(auto it=replacements.crbegin();it!=replacements.crend();++it)text.replace(it->capturedStart(),it->capturedLength(),QChar(it->captured(1).toUShort(nullptr,16)));
+    // Older AutoCAD MIF escapes otherwise display as long literal strings and
+    // inflate hit-test bounds outside a title-block selection rectangle.
+    static const QRegularExpression mif(R"(\\M\+([1-5])([0-9a-fA-F]{4}))");
+    auto mifMatches=mif.globalMatch(text);replacements.clear();while(mifMatches.hasNext())replacements.append(mifMatches.next());
+    for(auto it=replacements.crbegin();it!=replacements.crend();++it) {
+        const char* names[]{"","Shift_JIS","Big5","EUC-KR","Johab","GBK"};
+        int code=it->captured(1).toInt();QStringDecoder decoder(names[code]);
+        auto bytes=QByteArray::fromHex(it->captured(2).toLatin1());QString decoded=decoder(bytes);
+        bool valid=decoder.isValid()&&!decoder.hasError()&&!decoded.isEmpty();
+#ifdef Q_OS_WIN
+        if(!valid){const UINT pages[]{0,932,950,949,1361,936};wchar_t wide[4]{};int count=MultiByteToWideChar(pages[code],MB_ERR_INVALID_CHARS,bytes.constData(),bytes.size(),wide,4);if(count>0){decoded=QString::fromWCharArray(wide,count);valid=true;}}
+#endif
+        if(valid)text.replace(it->capturedStart(),it->capturedLength(),decoded);
+    }
     return text;
 }
 QByteArray raw(const Tags& tags,int code,QByteArray fallback={}) {for(const auto& p:tags)if(p.code==code)return p.raw.trimmed();return fallback;}
@@ -30,6 +53,25 @@ double num(const Tags& t,int c,double fallback=0) {
     auto v=raw(t,c);if(v.isEmpty())return fallback;bool ok=false;double n=v.toDouble(&ok);
     if(!ok||!std::isfinite(n))fail(QString("DXF 含无效数值（组码 %1）。").arg(c));
     return n;
+}
+int intNum(const Tags& t,int c,int fallback=0) {
+    double n=num(t,c,fallback);
+    if(std::floor(n)!=n||n<std::numeric_limits<int>::min()||n>std::numeric_limits<int>::max())
+        fail(QString("DXF 组码 %1 的整数值超出范围。").arg(c));
+    return int(n);
+}
+quint32 colorValue(const Tags& t,int c) {
+    double n=num(t,c);
+    if(std::floor(n)!=n||n<0||n>double(std::numeric_limits<quint32>::max()))
+        fail(QString("DXF 组码 %1 的颜色值超出范围。").arg(c));
+    return quint32(n);
+}
+bool saneGeometry(const Entity& e,double limit) {
+    for(auto p:e.points)if(!geo::finite(p)||std::abs(p.x())>limit||std::abs(p.y())>limit)return false;
+    for(double v:{e.radius,e.height,e.constantWidth,e.textBoxWidth})if(!std::isfinite(v)||std::abs(v)>limit)return false;
+    for(auto w:e.widths)if(!std::isfinite(w.first)||!std::isfinite(w.second)||std::abs(w.first)>limit||std::abs(w.second)>limit)return false;
+    for(double b:e.bulges)if(!std::isfinite(b)||std::abs(b)>1e6)return false;
+    return true;
 }
 void checkCancelled(const DxfReadOptions& options) {if(options.cancelled&&options.cancelled())fail("DXF 读取已取消。");}
 Tags parseTags(const QByteArray& bytes,const DxfReadOptions& options={}) {
@@ -78,16 +120,23 @@ QVector<Record> records(const Tags& tags,const DxfReadOptions& options={},bool s
         i=end;
     }return result;
 }
-QColor aci(int index) {
-    switch(std::abs(index)) {case 1:return QColor("#ff5555");case 2:return QColor("#ffce73");case 3:return QColor("#56d9bd");
+QColor aci(qint64 index) {
+    auto value=std::abs(index);
+    switch(value) {case 1:return QColor("#ff5555");case 2:return QColor("#ffce73");case 3:return QColor("#56d9bd");
     case 4:return QColor("#66ddee");case 5:return QColor("#7ea7ff");case 6:return QColor("#dd88ee");case 7:return QColor("#dce7ef");}
-    return QColor::fromHsv((std::abs(index)*17)%360,160,230);
+    return QColor::fromHsv(int((value*17)%360),160,230);
 }
 QColor color(const Tags& t,bool layer=false) {
-    if(!raw(t,420).isEmpty())return QColor::fromRgb(quint32(num(t,420)));
-    int code=int(num(t,62,layer?7:256));return code==256||code==0?QColor{}:aci(code);
+    if(!raw(t,420).isEmpty())return QColor::fromRgb(colorValue(t,420));
+    int code=intNum(t,62,layer?7:256);return code==256||code==0?QColor{}:aci(code);
 }
 QPointF point(const Tags& t,int c=10) {return {num(t,c),num(t,c+10)};}
+bool planar(const Tags& t) {
+    // Ignore round-off from CAD transforms, not genuinely elevated/3D geometry.
+    constexpr double tolerance=1e-9;
+    return std::abs(num(t,210))<=tolerance&&std::abs(num(t,220))<=tolerance&&std::abs(num(t,230,1)-1)<=tolerance&&
+        std::abs(num(t,30))<=tolerance&&std::abs(num(t,31))<=tolerance&&std::abs(num(t,38))<=tolerance;
+}
 bool model(const Record& r) {return r.section=="ENTITIES"&&num(r.tags,67)==0&&(str(r.tags,410).isEmpty()||str(r.tags,410)=="Model");}
 QByteArray sourceAttributes(const Record& r) {
     QByteArray result("source:");
@@ -98,7 +147,7 @@ QByteArray sourceAttributes(const Record& r) {
     if(r.type=="CIRCLE"||r.type=="ARC")geometry.insert(40);
     if(r.type=="ARC")geometry.unite({50,51});
     if(r.type=="LWPOLYLINE")geometry.unite({40,41,42,43,90});
-    if(r.type=="LWPOLYLINE")result+="flags:"+QByteArray::number(int(num(r.tags,70))&~1)+";";
+    if(r.type=="LWPOLYLINE")result+="flags:"+QByteArray::number(intNum(r.tags,70)&~1)+";";
     bool xdata=false;
     for(const auto& p:r.tags) {
         if(p.code==1001)xdata=true;
@@ -107,15 +156,54 @@ QByteArray sourceAttributes(const Record& r) {
     }
     return result;
 }
-std::optional<Entity> convert(const Record& r,const DxfReadOptions& options) {
-    const auto& t=r.tags;Entity e;e.layer=str(t,8,"0");e.color=color(t);e.sourceKey=r.key;e.sourceAttributes=sourceAttributes(r);
-    if(num(t,210)!=0||num(t,220)!=0||num(t,230,1)!=1||num(t,30)!=0||num(t,31)!=0||num(t,38)!=0)return {};
+QString plainMtext(QString text) {
+    // A display-only subset of MTEXT formatting; the original string remains in
+    // sourceDxf. Never write this approximation back as replacement geometry.
+    QString result;
+    for(qsizetype i=0;i<text.size();++i) {
+        QChar c=text[i];
+        // DXF caret-encoded controls are used by real CAD exports alongside \P.
+        if(c=='^'&&i+1<text.size()) {
+            auto next=text[i+1];
+            if(next==' '){result+='^';++i;continue;}
+            if(next=='J'||next=='M'){result+='\n';++i;if(next=='M'&&text.mid(i+1,2)=="^J")i+=2;continue;}
+            if(next=='I'){result+='\t';++i;continue;}
+        }
+        if(c=='{'||c=='}')continue;
+        if(c!='\\'){result+=c;continue;}
+        if(++i==text.size()){result+='\\';break;}
+        c=text[i];
+        if(c=='P'||c=='X')result+='\n';
+        else if(c=='~')result+=' ';
+        else if(c=='\\'||c=='{'||c=='}')result+=c;
+        else if(QString("LlOoKk").contains(c))continue;
+        else if(QString("AaCcFfHhQqTtWwSs").contains(c)) {
+            auto end=text.indexOf(';',i+1);
+            if(end<0){result+='\\';result+=c;continue;}
+            if(c=='S'||c=='s'){auto stack=text.mid(i+1,end-i-1);stack.replace('^','/');stack.replace('#','/');result+=stack;}
+            i=end;
+        } else {result+='\\';result+=c;}
+    }
+    result.replace("\r\n","\n");result.replace('\r','\n');return result;
+}
+bool singleLineDimensionText(const QString& text) {
+    return !text.contains('\n')&&!text.contains('\r')&&!text.contains('\\')&&
+        !text.contains('{')&&!text.contains('}')&&text.count("<>")<=1;
+}
+std::optional<Entity> convert(const Record& r,const DxfReadOptions& options,QHash<QString,QByteArray>* attributesCache=nullptr) {
+    const auto& t=r.tags;Entity e;e.layer=str(t,8,"0");e.color=color(t);e.sourceKey=r.key;
+    if(attributesCache) {
+        auto it=attributesCache->find(r.key);
+        if(it==attributesCache->end())it=attributesCache->insert(r.key,sourceAttributes(r));
+        e.sourceAttributes=it.value();
+    } else e.sourceAttributes=sourceAttributes(r);
+    if(!planar(t))return {};
     if(r.type=="LINE") {e.points={point(t),point(t,11)};if(geo::length(e.points[0],e.points[1])<geo::epsilon)return {};}
     else if(r.type=="CIRCLE"||r.type=="ARC") {
         e.kind=r.type=="CIRCLE"?Kind::Circle:Kind::Arc;e.points={point(t)};e.radius=num(t,40);
         e.start=geo::normalizeAngle(num(t,50));e.sweep=geo::normalizeAngle(num(t,51)-e.start);if(e.radius<=0)return {};
     } else if(r.type=="LWPOLYLINE") {
-        e.kind=Kind::Polyline;e.closed=int(num(t,70))&1;e.constantWidth=num(t,43);
+        e.kind=Kind::Polyline;e.closed=intNum(t,70)&1;e.constantWidth=num(t,43);
         for(const auto& p:t) {
             bool ok=false;double n=p.raw.toDouble(&ok);
             if((p.code==10||p.code==20||p.code==40||p.code==41||p.code==42)&&(!ok||!std::isfinite(n)))fail("多段线包含无效顶点。");
@@ -129,10 +217,10 @@ std::optional<Entity> convert(const Record& r,const DxfReadOptions& options) {
     } else if(r.type=="POLYLINE") {
         auto parts=records(t,{},false);const auto& header=parts.first().tags;
         // Curve-fit, spline-fit, 3D polylines and meshes need different geometry.
-        if(int(num(header,70))&~(1|128))return {};
-        e.kind=Kind::Polyline;e.closed=int(num(header,70))&1;
+        if(intNum(header,70)&~(1|128))return {};
+        e.kind=Kind::Polyline;e.closed=intNum(header,70)&1;
         for(const auto& part:parts)if(part.type=="VERTEX") {
-            if(int(num(part.tags,70))!=0||num(part.tags,30)!=0)return {};
+            if(intNum(part.tags,70)!=0||num(part.tags,30)!=0)return {};
             e.points.append(point(part.tags));e.bulges.append(num(part.tags,42));
             e.widths.append({num(part.tags,40,num(header,40)),num(part.tags,41,num(header,41))});
         }
@@ -146,10 +234,11 @@ std::optional<Entity> convert(const Record& r,const DxfReadOptions& options) {
     } else if(r.type=="SPLINE") {
         // Rational B-spline preview only: sample each nonempty knot span.
         // Keep the original record, and exclude approximation from engineering measurements.
-        if(int(num(t,70))&2)return {}; // Periodic curves require seam-aware sampling.
+        if(intNum(t,70)&2)return {}; // Periodic curves require seam-aware sampling.
         double degreeValue=num(t,71),countValue=num(t,73),knotCountValue=num(t,72);
         if(degreeValue<1||degreeValue>8||degreeValue!=std::floor(degreeValue)||countValue<2||countValue!=std::floor(countValue)||knotCountValue!=std::floor(knotCountValue))return {};
         if(countValue>options.maxVerticesPerEntity||knotCountValue>options.maxVerticesPerEntity+9)fail("DXF 单个对象的顶点数超过限制。");
+        if(countValue>std::numeric_limits<int>::max()||knotCountValue>std::numeric_limits<int>::max())return {};
         int degree=int(degreeValue),count=int(countValue),knotCount=int(knotCountValue);
         if(count<=degree||knotCount!=count+degree+1)return {};
         QVector<QPointF> controls;QVector<double> knots,weights;
@@ -185,8 +274,8 @@ std::optional<Entity> convert(const Record& r,const DxfReadOptions& options) {
     } else if(r.type=="HATCH") {
         // Display solid polyline boundaries only. Keep the original HATCH and its
         // associations untouched; this entity is a read-only drawing preview.
-        if(int(num(t,70))!=1)return {};
-        int style=int(num(t,75));if(style<0||style>2)return {};
+        if(intNum(t,70)!=1)return {};
+        int style=intNum(t,75);if(style<0||style>2)return {};
         double paths=num(t,91);if(paths<1||paths!=std::floor(paths)||paths>t.size())return {};
         qsizetype pathCount=qsizetype(paths),totalVertices=0;
         e.kind=Kind::Hatch;e.readOnly=true;
@@ -195,14 +284,14 @@ std::optional<Entity> convert(const Record& r,const DxfReadOptions& options) {
             checkCancelled(options);
             while(i<t.size()&&t[i].code!=92)++i;
             if(i==t.size())return {};
-            int flags=int(num(t.mid(i,1),92));++i;
+            int flags=intNum(t.mid(i,1),92);++i;
             if(!(flags&2))return {}; // Edge paths require different parsing.
             qsizetype end=i;while(end<t.size()&&t[end].code!=92&&t[end].code!=75)++end;
             auto loop=t.mid(i,end-i);double countValue=num(loop,93);
             if(countValue<2||countValue!=std::floor(countValue))return {};
             if(countValue>options.maxVerticesPerEntity-totalVertices)fail("DXF 单个对象的顶点数超过限制。");
             qsizetype count=qsizetype(countValue);totalVertices+=count;
-            if(int(num(loop,73))!=1)return {};
+            if(intNum(loop,73)!=1)return {};
             bool include=style==0||(style==1&&(flags&(1|16)))||(style==2&&(flags&1));
             QVector<QPointF> points;QVector<double> bulges;
             bool vertices=false;
@@ -224,18 +313,45 @@ std::optional<Entity> convert(const Record& r,const DxfReadOptions& options) {
         if(e.sweep<=e.start)e.sweep+=2*geo::pi;
         e.closed=std::abs(e.sweep-e.start-2*geo::pi)<1e-7;
         if(e.ratio<=0||e.ratio>1||geo::length({},e.points[1])<geo::epsilon)return {};
-    } else if(r.type=="TEXT") {
-        if(num(t,72)!=0||num(t,73)!=0)return {};
+    } else if(r.type=="TEXT"||r.type=="MTEXT") {
         e.kind=Kind::Text;e.points={point(t)};e.height=num(t,40,2.5);e.rotation=num(t,50);
-        for(const auto& p:t)if(p.code==1){e.text=string(p.raw);break;}
+        if(r.type=="MTEXT") {
+            int anchor=intNum(t,71,1);if(anchor<1||anchor>9||num(t,72,1)==3)return {};
+            QByteArray content;for(const auto& p:t)if(p.code==3||p.code==1)content+=p.raw;
+            e.text=plainMtext(string(content));e.readOnly=true;
+            e.textBoxWidth=num(t,41);e.textLineSpacing=num(t,44,1);
+            if(e.textBoxWidth<0||e.textLineSpacing<0.25||e.textLineSpacing>4)return {};
+            e.textHorizontal=(anchor-1)%3;e.textVertical=3-(anchor-1)/3;
+            // The last rotation/direction tag controls orientation in DXF.
+            for(const auto& p:t)if(p.code==50)e.rotation=num(Tags{p},50);
+                else if(p.code==11){auto direction=point(t,11);if(geo::length({},direction)>geo::epsilon)e.rotation=geo::angle({},direction);}
+        } else {
+            int horizontal=intNum(t,72),vertical=intNum(t,73);
+            if(horizontal<0||horizontal>5||vertical<0||vertical>3||num(t,51)!=0||num(t,71)!=0)return {};
+            e.textWidthFactor=num(t,41,1);if(e.textWidthFactor<=0)return {};
+            for(const auto& p:t)if(p.code==1){e.text=string(p.raw);break;}
+            if(horizontal==3||horizontal==5)return {}; // Aligned/Fit require stretching between two points.
+            e.textHorizontal=horizontal==4?1:horizontal;e.textVertical=horizontal==4?2:vertical;
+            if(horizontal||vertical){if(raw(t,11).isEmpty())return {};e.points={point(t,11)};}
+            e.readOnly=horizontal||vertical||e.textWidthFactor!=1;
+        }
         if(e.height<=0)return {};
     } else if(r.type=="DIMENSION"&&str(t,1001)=="CADWB") {
         e.kind=Kind::Dimension;e.points={point(t,13),point(t,14),point(t)};e.text=str(t,1,"<>");
+        if(str(t,1000)=="panel-mm"){e.dimensionFormat=1;e.dimensionPrecision=std::clamp(intNum(t,1070,3),0,6);e.height=num(t,1040,2.5);}
     } else return {};
+    if(!saneGeometry(e,options.maxCoordinate))return {};
     return e;
 }
 struct Block {QPointF base;QVector<Record> contents;bool supported=true;};
 using Blocks=QHash<QString,Block>;
+Record dimensionReference(const Record& r) {
+    // External dimensions have an anonymous graphics block already positioned in
+    // model coordinates. It is not an INSERT at the dimension definition point.
+    Tags t{{0,"INSERT"},{2,raw(r.tags,2)},{8,raw(r.tags,8,"0")}};
+    for(int code:{62,420,210,220,230,30})if(!raw(r.tags,code).isEmpty())t.append({code,raw(r.tags,code)});
+    return {r.section,"DIMENSION",r.key,t};
+}
 bool transformInsert(Entity& e,const Tags& tags,QPointF base,QPointF offset) {
     double sx=num(tags,41,1),sy=num(tags,42,1),angle=num(tags,50);
     if(sx==0||sy==0)return false;
@@ -251,26 +367,32 @@ bool transformInsert(Entity& e,const Tags& tags,QPointF base,QPointF offset) {
         if(sy<0)e.mirror({0,0},{1,0});
         double scale=std::abs(sx);
         for(auto& p:e.points)p*=scale;
-        e.radius*=scale;e.height*=scale;e.constantWidth*=scale;
+        e.radius*=scale;e.height*=scale;e.constantWidth*=scale;e.textBoxWidth*=scale;
         for(auto& w:e.widths){w.first*=scale;w.second*=scale;}
     } else for(auto& p:e.points)p={p.x()*sx,p.y()*sy};
     e.translate(offset);e.rotate({},angle);e.translate(point(tags));return true;
 }
 bool expandInsert(const Record& r,const Blocks& blocks,const DxfReadOptions& options,
-                  QVector<Entity>& result,QSet<QString>& active,bool& complete,QString layer="0",QColor byBlock={},int depth=0) {
+                  QVector<Entity>& result,QSet<QString>& active,bool& complete,QString layer="0",QColor byBlock={},int depth=0,
+                  QHash<QString,QByteArray>* attributesCache=nullptr,qsizetype* expandedBytes=nullptr) {
     checkCancelled(options);const auto& t=r.tags;QString name=str(t,2);
     if(depth>=options.maxBlockDepth||active.contains(name))fail("DXF 块引用循环或嵌套超过限制。");
-    if(!blocks.contains(name)||!blocks[name].supported||num(t,30)!=0||num(t,210)!=0||num(t,220)!=0||num(t,230,1)!=1)return false;
+    if(!blocks.contains(name)||!blocks.value(name).supported||!planar(t))return false;
     if(num(t,66)!=0)complete=false;
     auto ownLayer=str(t,8,"0");if(ownLayer!="0")layer=ownLayer;
     auto ownColor=color(t);if(ownColor.isValid())byBlock=ownColor;
     else if(num(t,62,256)!=0)byBlock={};
-    const auto& block=blocks[name];active.insert(name);QVector<Entity> local;
-    for(const auto& child:block.contents) {
+    // Keep only a digest of the parent INSERT attributes on expanded children.
+    // Copying the full XDATA into every child caused O(children × INSERT bytes) memory use.
+    QByteArray parentTag="|parent:"+QCryptographicHash::hash(sourceAttributes(r),QCryptographicHash::Sha256).toHex();
+    const auto& block=blocks[name];active.insert(name);QVector<Entity> local;    for(const auto& child:block.contents) {
         checkCancelled(options);
-        if(child.type=="INSERT") {if(!expandInsert(child,blocks,options,local,active,complete,layer,byBlock,depth+1))complete=false;}
+        if(child.type=="INSERT") {if(!expandInsert(child,blocks,options,local,active,complete,layer,byBlock,depth+1,attributesCache,expandedBytes))complete=false;}
+        else if(child.type=="DIMENSION"&&str(child.tags,1001)!="CADWB") {
+            complete=false;expandInsert(dimensionReference(child),blocks,options,local,active,complete,layer,byBlock,depth+1,attributesCache,expandedBytes);
+        }
         else {
-            auto e=convert(child,options);if(!e){complete=false;continue;}
+            auto e=convert(child,options,attributesCache);if(!e){complete=false;continue;}
             if(e->readOnly)complete=false;
             if(e->layer=="0")e->layer=layer;
             if(num(child.tags,62,256)==0&&!e->color.isValid())e->color=byBlock;
@@ -284,7 +406,13 @@ bool expandInsert(const Record& r,const Blocks& blocks,const DxfReadOptions& opt
     if(local.size()*cols*rows>options.maxExpandedEntities-result.size())fail("DXF 块展开对象数超过限制。");
     for(int row=0;row<int(rows);++row)for(int col=0;col<int(cols);++col)for(auto e:local) {
         checkCancelled(options);
-        if(!transformInsert(e,t,block.base,{col*num(t,44),row*num(t,45)})){complete=false;continue;}
+        if(r.type!="DIMENSION"&&!transformInsert(e,t,block.base,{col*num(t,44),row*num(t,45)})){complete=false;continue;}
+        if(!saneGeometry(e,options.maxCoordinate)){complete=false;continue;}
+        e.sourceAttributes+=parentTag;
+        if(expandedBytes) {
+            *expandedBytes+=e.sourceAttributes.size();
+            if(*expandedBytes>options.maxExpandedBytes)fail("DXF 块展开后的属性数据超过内存限制。");
+        }
         result.append(e);
     }
     return true;
@@ -292,7 +420,12 @@ bool expandInsert(const Record& r,const Blocks& blocks,const DxfReadOptions& opt
 Pair tag(int c,QString v) {
     if(v.contains('\n')||v.contains('\r'))fail("DXF 单行字段不能包含换行；请使用单行文字和图层名。");
     QString escaped;
-    for(QChar ch:v)escaped+=ch.unicode()>127?QString("\\U+%1").arg(ch.unicode(),4,16,QChar('0')).toUpper():QString(ch);
+    for(QChar ch:v) {
+        ushort code=ch.unicode();
+        if(ch=='\\')escaped+="\\U+005C"; // keep literal backslashes from becoming \U+XXXX escapes
+        else if(code>127||code<32||code==127)escaped+=QString("\\U+%1").arg(code,4,16,QChar('0')).toUpper();
+        else escaped+=ch;
+    }
     return {c,escaped.toUtf8()};
 }
 Pair tag(int c,double n) {return {c,QByteArray::number(n,'g',16)};}
@@ -311,7 +444,8 @@ Tags geometry(const Entity& e,QString block={}) {
     else if(e.kind==Kind::Text){t.append(tag(100,"AcDbText"));addPoint(t,10,e.points[0]);t+={tag(40,e.height),tag(1,e.text),tag(50,e.rotation),tag(100,"AcDbText")};}
     else if(e.kind==Kind::Dimension){t+={tag(100,"AcDbDimension"),tag(2,block),tag(70,33.),tag(1,e.text),tag(3,"Standard")};
         addPoint(t,10,e.points[2]);addPoint(t,11,(e.points[0]+e.points[1])/2);t.append(tag(100,"AcDbAlignedDimension"));addPoint(t,13,e.points[0]);addPoint(t,14,e.points[1]);
-        t+={tag(1001,"CADWB"),tag(1000,"aligned")};}
+        t+={tag(1001,"CADWB"),tag(1000,e.dimensionFormat==1?"panel-mm":"aligned")};
+        if(e.dimensionFormat==1)t+={tag(1070,double(e.dimensionPrecision)),tag(1040,e.height)};}
     return t;
 }
 Tags fresh(const Entity& e,QString block={},bool legacy=false) {
@@ -338,7 +472,7 @@ Tags updated(const Record& r,const Entity& e) {
     if(r.type=="POLYLINE") {
         auto parts=records(r.tags,{},false);Tags result;qsizetype vertex=0;
         for(auto& part:parts) {
-            if(part.type=="POLYLINE")set(part.tags,70,QByteArray::number((int(num(part.tags,70))&~1)|(e.closed?1:0)));
+            if(part.type=="POLYLINE")set(part.tags,70,QByteArray::number((intNum(part.tags,70)&~1)|(e.closed?1:0)));
             if(part.type=="VERTEX") {
                 if(vertex>=e.points.size())continue;
                 auto p=e.points[vertex];auto w=e.widths.value(vertex);
@@ -387,6 +521,7 @@ Tags updated(const Record& r,const Entity& e) {
 }
 Tags dimensionBlock(const Entity& e,QString name,int units) {
     Tags t{tag(0,"BLOCK"),tag(100,"AcDbEntity"),tag(8,e.layer),tag(100,"AcDbBlockBegin"),tag(2,name),tag(70,1.),tag(10,0.),tag(20,0.),tag(30,0.),tag(3,name),tag(1,"")};
+    if(e.dimensionFormat==1){for(const auto& part:dimension::graphics(e,units))t+=fresh(part);t+={tag(0,"ENDBLK"),tag(100,"AcDbEntity"),tag(8,e.layer),tag(100,"AcDbBlockEnd")};return t;}
     auto a=e.points[0],b=e.points[1],c=e.points[2],delta=c-geo::project(c,a,b,false),aa=a+delta,bb=b+delta;
     auto line=[&](QPointF p,QPointF q){Entity l;l.points={p,q};l.layer=e.layer;l.color=e.color;t+=fresh(l);};
     line(a,aa);line(b,bb);line(aa,bb);
@@ -408,9 +543,10 @@ Document DxfAdapter::read(const QString& path,const DxfReadOptions& options) {
 }
 Document DxfAdapter::parse(const QByteArray& bytes,const DxfReadOptions& options) {
     auto tags=parseTags(bytes,options);checkCancelled(options);auto recs=records(tags,options);bool entitiesSection=false,eof=false;
-    Document d;d.sourceDxf=bytes;d.units=0;
-    for(qsizetype i=0;i<tags.size();++i)if(tags[i].code==9&&string(tags[i].raw)=="$INSUNITS"&&i+1<tags.size())d.units=int(num(tags.mid(i+1,1),70));
-    QMap<QString,int> skipped;int partialInserts=0,splinePreviews=0;
+    Document d;d.sourceDxf=bytes;d.units=0;QHash<QString,QByteArray> attributesCache;qsizetype expandedBytes=0;
+    for(const auto& r:recs){auto layer=str(r.tags,8);if(!layer.isEmpty())d.sourceLayerKeys[layer].insert(r.key);}
+    for(qsizetype i=0;i<tags.size();++i)if(tags[i].code==9&&string(tags[i].raw)=="$INSUNITS"&&i+1<tags.size())d.units=intNum(tags.mid(i+1,1),70);
+    QMap<QString,int> skipped;int partialInserts=0,splinePreviews=0,textPreviews=0,dimensionPreviews=0,dimensionTextEditors=0,paperEntities=0;
     Blocks blocks;QString blockName;
     for(const auto& r:recs)if(r.section=="BLOCKS") {
         checkCancelled(options);
@@ -424,21 +560,48 @@ Document DxfAdapter::parse(const QByteArray& bytes,const DxfReadOptions& options
         if(r.type=="SECTION"&&r.section=="ENTITIES")entitiesSection=true;
         if(r.type=="EOF")eof=true;
         if(r.section=="TABLES"&&r.type=="LAYER") {
-            Layer l;l.name=str(r.tags,2);l.color=color(r.tags,true);int flags=int(num(r.tags,70));l.visible=num(r.tags,62,7)>0&&!(flags&1);l.locked=flags&4;l.lineweight=std::max(0.05,num(r.tags,370,25)/100);d.layers.insert(l.name,l);
+            Layer l;l.name=str(r.tags,2);l.color=color(r.tags,true);int flags=intNum(r.tags,70);l.visible=num(r.tags,62,7)>0&&!(flags&1);l.locked=flags&4;l.lineweight=std::max(0.05,num(r.tags,370,25)/100);d.layers.insert(l.name,l);
         }
+        if(r.section=="ENTITIES"&&r.type!="SECTION"&&r.type!="ENDSEC"&&!model(r))++paperEntities;
         if(model(r)&&r.type!="SECTION"&&r.type!="ENDSEC") {
-            if(r.type=="INSERT") {
+            bool externalDimension=r.type=="DIMENSION"&&str(r.tags,1001)!="CADWB";
+            if(r.type=="INSERT"||externalDimension) {
                 QVector<Entity> expanded;QSet<QString> active;bool complete=true;
-                if(expandInsert(r,blocks,options,expanded,active,complete)&&!expanded.isEmpty()) {
+                if(expandInsert(externalDimension?dimensionReference(r):r,blocks,options,expanded,active,complete,"0",{},0,&attributesCache,&expandedBytes)&&!expanded.isEmpty()) {
                     if(expanded.size()>options.maxExpandedEntities-d.entities.size())fail("DXF 块展开对象数超过限制。");
-                    if(!complete)++partialInserts;
-                    for(qsizetype i=0;i<expanded.size();++i){auto& e=expanded[i];if(e.kind==Kind::SplinePreview)++splinePreviews;e.readOnly|=!complete;e.sourceKey=r.key+"/"+QString::number(i);e.sourceAttributes+=sourceAttributes(r);d.load(e);}
-                    d.importedKeys.insert(r.key);
+                    if(externalDimension){complete=false;++dimensionPreviews;}else if(!complete)++partialInserts;
+                    if(externalDimension&&blocks.contains(str(r.tags,2))) {
+                        // Only a single direct TEXT/MTEXT label is safe to replace.
+                        // Nested dimensions, ambiguous labels and complex overrides remain read-only.
+                        auto override=str(r.tags,1,"<>");if(override.isEmpty())override="<>";
+                        QVector<qsizetype> labels;for(qsizetype i=0;i<expanded.size();++i)if(expanded[i].kind==Kind::Text)labels.append(i);
+                        if(labels.size()==1&&singleLineDimensionText(override)) {
+                            auto& label=expanded[labels.first()];bool direct=false;
+                            for(const auto& child:blocks[str(r.tags,2)].contents)
+                                if(child.key==label.sourceKey&&(child.type=="TEXT"||child.type=="MTEXT"))direct=true;
+                            QString automatic;int placeholder=override.indexOf("<>");
+                            if(placeholder>=0) {
+                                auto prefix=override.left(placeholder),suffix=override.mid(placeholder+2);
+                                if(label.text.startsWith(prefix)&&label.text.endsWith(suffix)&&label.text.size()>=prefix.size()+suffix.size())
+                                    automatic=label.text.mid(prefix.size(),label.text.size()-prefix.size()-suffix.size());
+                            } else if(!raw(r.tags,42).isEmpty()) {
+                                static const QRegularExpression numeric(R"(^[+-]?\d+(?:\.(\d+))?)");
+                                auto match=numeric.match(label.text);int precision=match.hasMatch()?match.captured(1).size():3;
+                                automatic=QString::number(num(r.tags,42),'f',std::min(precision,10));
+                            }
+                            bool numeric=false;automatic.toDouble(&numeric);
+                            if(direct&&numeric&&singleLineDimensionText(label.text)) {
+                                label.dimensionTextKey=r.key;label.dimensionTextOverride=override;label.dimensionAutoText=automatic;++dimensionTextEditors;
+                            }
+                        }
+                    }
+                    for(qsizetype i=0;i<expanded.size();++i){auto& e=expanded[i];if(e.kind==Kind::SplinePreview)++splinePreviews;if(e.kind==Kind::Text&&e.readOnly)++textPreviews;e.readOnly|=!complete;e.sourceKey=r.key+"/"+QString::number(i);d.load(e);}
+                    if(!externalDimension)d.importedKeys.insert(r.key);
                 } else skipped[r.type]++;
                 continue;
             }
-            auto e=convert(r,options);
-            if(e){if(e->kind==Kind::SplinePreview)++splinePreviews;if(e->readOnly)e->sourceKey=r.key+"/preview";d.load(*e);
+            auto e=convert(r,options,&attributesCache);
+            if(e){if(e->kind==Kind::SplinePreview)++splinePreviews;if(e->kind==Kind::Text&&e->readOnly)++textPreviews;if(e->readOnly)e->sourceKey=r.key+"/preview";d.load(*e);
                 if(!e->readOnly)d.importedKeys.insert(r.key);
             }else skipped[r.type]++;
         }
@@ -449,6 +612,9 @@ Document DxfAdapter::parse(const QByteArray& bytes,const DxfReadOptions& options
     for(auto it=skipped.begin();it!=skipped.end();++it)d.warnings.append(QString("%1 × %2 暂不显示/编辑，保存时保留源记录。").arg(it.key()).arg(it.value()));
     if(partialInserts)d.warnings.append(QString("%1 个块部分显示；为保护原始数据，这些块只读，保存时保留原始块引用。").arg(partialInserts));
     if(splinePreviews)d.warnings.append(QString("SPLINE × %1 为近似只读预览，不参与捕捉、长度和工程间距计算；保存时保留原记录。").arg(splinePreviews));
+    if(textPreviews)d.warnings.append(QString("文字 × %1 为只读预览：支持 MTEXT 段落、栏宽自动换行及 TEXT 对齐；字体和复杂格式可能不同，保存时保留原记录。").arg(textPreviews));
+    if(dimensionPreviews)d.warnings.append(QString("DIMENSION × %1 按原始图形块预览，尺寸线和箭头不可改几何，但选中任意部分可删除整条标注；其中 %2 个支持双击编辑单行文字 / 公差（<> 保留原实测值）。").arg(dimensionPreviews).arg(dimensionTextEditors));
+    if(paperEntities)d.warnings.append(QString("布局/图纸空间 × %1 条记录未显示；当前画布仅显示模型空间，保存时保留源记录。").arg(paperEntities));
     if(d.units==0)d.warnings.append("文件未声明单位，按图形坐标单位显示。");
     for(const auto& l:d.layers)if(l.visible&&!l.locked){d.currentLayer=l.name;break;}
     d.markSaved();return d;
@@ -456,21 +622,86 @@ Document DxfAdapter::parse(const QByteArray& bytes,const DxfReadOptions& options
 QByteArray DxfAdapter::serialize(const Document& d) {
     QHash<QString,Entity> current;QVector<Entity> additions;QSet<QString> layerNames;
     for(const auto& e:d.entities){if(e.sourceKey.isEmpty())additions.append(e);else current.insert(e.sourceKey,e);}
+    QHash<QString,Entity> dimensionEdits;
     for(auto it=d.baseline.cbegin();it!=d.baseline.cend();++it)if(it.value().readOnly) {
-        if(!current.contains(it.key())||current.value(it.key())!=it.value())fail("只读的 DXF 填充或不完整块不能修改；原始记录已保留。");
+        if(d.deletedSources.contains(it.key().section('/',0,0))) {
+            if(current.contains(it.key()))fail("已删除的源实例仍有残留预览对象。");
+            continue;
+        }
+        if(!current.contains(it.key()))fail("只读的 DXF 预览对象不能删除；原始记录已保留。");
+        auto e=current.value(it.key()),original=it.value();
+        if(e==original)continue;
+        auto geometry=e;geometry.text=original.text;geometry.dimensionTextOverride=original.dimensionTextOverride;
+        if(original.dimensionTextKey.isEmpty()||geometry!=original||!singleLineDimensionText(e.dimensionTextOverride))
+            fail("只读的 DXF 预览对象仅允许编辑受支持标注的单行文字；原始记录已保留。");
+        auto expected=e.dimensionTextOverride;expected.replace("<>",original.dimensionAutoText);
+        if(expected!=e.text)fail("标注文字与覆盖内容不一致。");
+        dimensionEdits.insert(original.dimensionTextKey,e);
     }
     for(const auto& e:additions)if(e.kind==Kind::Hatch||e.readOnly)fail("只读预览对象不能另存为新图元。");
     bool legacy=false;
+    QByteArray skeleton="0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1024\n9\n$INSUNITS\n70\n4\n0\nENDSEC\n0\nSECTION\n2\nTABLES\n0\nTABLE\n2\nLAYER\n70\n0\n0\nENDTAB\n0\nENDSEC\n0\nSECTION\n2\nBLOCKS\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n";
+    // Parse the source once and reuse the tag stream for both version detection
+    // and record reconstruction (the previous code parsed up to 256 MiB twice).
+    auto sourceTags=parseTags(d.sourceDxf.isEmpty()?skeleton:d.sourceDxf);
     if(!d.sourceDxf.isEmpty()) {
-        auto sourceTags=parseTags(d.sourceDxf);QString version;
+        QString version;
         for(qsizetype i=0;i+1<sourceTags.size();++i)if(sourceTags[i].code==9&&string(sourceTags[i].raw)=="$ACADVER")version=string(sourceTags[i+1].raw);
         legacy=version.isEmpty()||version<"AC1015";
     }
-    QByteArray skeleton="0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1024\n9\n$INSUNITS\n70\n4\n0\nENDSEC\n0\nSECTION\n2\nTABLES\n0\nTABLE\n2\nLAYER\n70\n0\n0\nENDTAB\n0\nENDSEC\n0\nSECTION\n2\nBLOCKS\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n";
-    auto recs=records(parseTags(d.sourceDxf.isEmpty()?skeleton:d.sourceDxf));
+    auto recs=records(sourceTags);
+    // Explicit entity deletion must also remove its owned extension dictionary /
+    // DIMASSOC objects, otherwise independent CAD readers repair dangling owners.
+    QSet<QString> removedHandles;
+    for(const auto& r:recs)if(model(r)) {
+        bool deleted=d.deletedSources.contains(r.key);
+        if(d.importedKeys.contains(r.key)) {
+            if(r.type=="INSERT") {
+                bool survives=false;for(const auto& e:current)if(e.sourceKey.section('/',0,0)==r.key){survives=true;break;}
+                deleted|=!survives;
+            } else deleted|=!current.contains(r.key);
+        }
+        if(deleted&&!str(r.tags,5).isEmpty())removedHandles.insert(str(r.tags,5));
+    }
+    bool cascading=true;while(cascading){cascading=false;for(const auto& r:recs)if(r.section=="OBJECTS"&&removedHandles.contains(str(r.tags,330))) {
+        auto handle=str(r.tags,5);if(!handle.isEmpty()&&!removedHandles.contains(handle)){removedHandles.insert(handle);cascading=true;}
+    }}
     std::sort(additions.begin(),additions.end(),[](const Entity& a,const Entity& b){return a.id<b.id;});
-    Tags extraEntities,extraBlocks;
+    Tags extraEntities,extraBlocks,extraBlockRecords;
     QSet<QString> blockNames;for(const auto& r:recs)if(r.type=="BLOCK")blockNames.insert(str(r.tags,2));
+    QHash<QString,QString> editedDimensionBlocks;
+    for(auto it=dimensionEdits.cbegin();it!=dimensionEdits.cend();++it) {
+        Record dimension;for(const auto& r:recs)if(r.key==it.key()&&model(r)&&r.type=="DIMENSION")dimension=r;
+        if(dimension.type.isEmpty())fail("找不到标注源记录。");
+        QString oldName=str(dimension.tags,2),name="*DCADTEXT"+QString::number(it->id);
+        while(blockNames.contains(name))name+="_";
+        blockNames.insert(name);editedDimensionBlocks.insert(it.key(),name);
+        extraBlockRecords+={tag(0,"BLOCK_RECORD"),tag(100,"AcDbSymbolTableRecord"),tag(100,"AcDbBlockTableRecord"),tag(2,name),tag(70,0.),tag(280,1.),tag(281,0.)};
+        bool inside=false,labelWritten=false;
+        for(const auto& r:recs)if(r.section=="BLOCKS") {
+            if(r.type=="BLOCK")inside=str(r.tags,2)==oldName;
+            if(!inside)continue;
+            Tags clone;bool applicationGroup=false,xdata=false;
+            for(const auto& p:r.tags) {
+                if(p.code==1001)xdata=true;
+                if(!xdata&&p.code==102){applicationGroup=p.raw.trimmed()!="}";continue;}
+                if(applicationGroup||(!xdata&&(p.code==5||p.code==330)))continue;
+                clone.append(p);
+            }
+            if(r.type=="BLOCK"){set(clone,2,tag(2,name).raw);set(clone,3,tag(3,name).raw);}
+            if(r.type=="TEXT"||r.type=="MTEXT") {
+                if(labelWritten)fail("标注块含多个文字对象，不能安全编辑。");
+                // Preserve the record type, attachment, font style, position and all geometry.
+                clone.removeIf([](const Pair& p){return p.code==1||p.code==3;});
+                auto content=tag(1,(r.type=="MTEXT"?QString("\\A1;"):QString())+it->text);
+                qsizetype at=clone.size();for(qsizetype i=0;i<clone.size();++i)if(clone[i].code==1001){at=i;break;}
+                clone.insert(at,content);labelWritten=true;
+            }
+            extraBlocks+=clone;
+            if(r.type=="ENDBLK"){inside=false;break;}
+        }
+        if(!labelWritten)fail("找不到可编辑标注文字。");
+    }
     auto add=[&](const Entity& e){if(e.kind==Kind::Dimension&&!legacy){QString name="*DCADWB"+QString::number(e.id)+"_"+QString::number(recs.size());
         while(blockNames.contains(name))name+="_";
         blockNames.insert(name);
@@ -482,9 +713,12 @@ QByteArray DxfAdapter::serialize(const Document& d) {
     // surviving geometry once. Other instances and BLOCK definitions stay intact.
     QHash<QString,QVector<QString>> insertChildren;
     for(auto it=d.baseline.begin();it!=d.baseline.end();++it)if(it.key().contains('/'))insertChildren[it.key().section('/',0,0)].append(it.key());
-    Tags out;QString table;bool sawBlocks=false,layerTable=false,unitsWritten=false;
+    Tags out;QString table;bool sawBlocks=false,layerTable=false,blockRecordTable=false,unitsWritten=false;
     for(auto r:recs) {
+        if(model(r)&&d.deletedSources.contains(r.key))continue;
+        if(r.section=="OBJECTS"&&removedHandles.contains(str(r.tags,5)))continue;
         if(r.type=="TABLE")table=str(r.tags,2);
+        if(r.type=="TABLE"&&table=="BLOCK_RECORD")blockRecordTable=true;
         if(r.section=="BLOCKS")sawBlocks=true;
         if(r.section=="HEADER") {
             for(qsizetype i=0;i<r.tags.size();++i)if(r.tags[i].code==9&&string(r.tags[i].raw)=="$INSUNITS"&&i+1<r.tags.size()) {r.tags[i+1]=tag(70,double(d.units));unitsWritten=true;}
@@ -494,13 +728,13 @@ QByteArray DxfAdapter::serialize(const Document& d) {
             layerTable=true;QString name=str(r.tags,2);if(!d.layers.contains(name))continue;layerNames.insert(name);auto l=d.layers.value(name);
             const auto original=d.sourceLayers.value(name,l);
             if(l.locked!=original.locked||l.visible!=original.visible) {
-                int flags=int(num(r.tags,70));
+                int flags=intNum(r.tags,70);
                 if(l.locked!=original.locked)flags=(flags&~4)|(l.locked?4:0);
                 if(l.visible!=original.visible&&l.visible)flags&=~1;
                 set(r.tags,70,QByteArray::number(flags));
             }
             if(l.visible!=original.visible) {
-                int aci=int(num(r.tags,62,7));if(aci==0)aci=7;
+                int aci=intNum(r.tags,62,7);if(aci==0)aci=7;
                 set(r.tags,62,QByteArray::number(l.visible?std::abs(aci):-std::abs(aci)));
             }
             if(l.color!=original.color)set(r.tags,420,QByteArray::number(l.color.rgb()&0xffffff));
@@ -508,7 +742,14 @@ QByteArray DxfAdapter::serialize(const Document& d) {
         }
         if(r.type=="TABLE"&&table=="LAYER")layerTable=true;
         if(r.type=="ENDTAB"&&table=="LAYER")for(const auto& l:d.layers)if(!layerNames.contains(l.name))out+=newLayer(l);
+        if(r.type=="ENDTAB"&&table=="BLOCK_RECORD")out+=extraBlockRecords;
+        if(r.section=="TABLES"&&r.type=="ENDSEC"&&!blockRecordTable&&!extraBlockRecords.isEmpty())
+            out+=Tags{tag(0,"TABLE"),tag(2,"BLOCK_RECORD"),tag(70,0.)}+extraBlockRecords+Tags{tag(0,"ENDTAB")};
         if(r.section=="TABLES"&&r.type=="ENDSEC"&&!layerTable){out+={tag(0,"TABLE"),tag(2,"LAYER"),tag(70,double(d.layers.size()))};for(const auto& l:d.layers)out+=newLayer(l);out.append(tag(0,"ENDTAB"));}
+        if(model(r)&&editedDimensionBlocks.contains(r.key)) {
+            set(r.tags,1,tag(1,dimensionEdits.value(r.key).dimensionTextOverride).raw);
+            set(r.tags,2,tag(2,editedDimensionBlocks.value(r.key)).raw);
+        }
         if(model(r)&&d.importedKeys.contains(r.key)) {
             if(r.type=="INSERT") {
                 auto keys=insertChildren.value(r.key);bool changed=false;
@@ -543,14 +784,35 @@ QByteArray DxfAdapter::serialize(const Document& d) {
     }
     // Assign unique handles to newly created entities/table entries, and table owners.
     auto handled=records(out,{},false);quint64 nextHandle=1;
-    for(const auto& r:handled){bool ok=false;auto handle=raw(r.tags,5).toULongLong(&ok,16);if(ok)nextHandle=std::max(nextHandle,handle+1);}
+    for(const auto& r:handled) {
+        if(r.section=="HEADER") {
+            // HANDSEED is already the next unused handle, not an allocated one.
+            // Treating it as an entity handle changes every no-op save.
+            for(qsizetype i=0;i+1<r.tags.size();++i)if(r.tags[i].code==9&&string(r.tags[i].raw)=="$HANDSEED") {
+                bool ok=false;auto seed=r.tags[i+1].raw.toULongLong(&ok,16);if(ok)nextHandle=std::max(nextHandle,seed);
+            }
+        } else for(const auto& pair:r.tags)if(pair.code==5||pair.code==105) {
+            // Legacy VERTEX/SEQEND handles and DIMSTYLE's code 105 also count.
+            bool ok=false;auto handle=pair.raw.toULongLong(&ok,16);if(ok)nextHandle=std::max(nextHandle,handle+1);
+        }
+    }
     for(auto& r:handled){if(r.type=="TABLE"||r.type=="LAYER"||r.type=="APPID"||r.section=="ENTITIES"||r.section=="BLOCKS"){
         if(r.type=="SECTION"||r.type=="ENDSEC"||r.type=="ENDTAB")continue;
         if(raw(r.tags,5).isEmpty())r.tags.insert(1,tag(5,QString::number(nextHandle++,16).toUpper()));
     }}
-    QByteArray owner;int tableStart=-1,tableCount=0;out.clear();
-    for(auto& r:handled){
-        if(r.type=="TABLE"){owner=raw(r.tags,5);tableStart=int(&r-handled.data());tableCount=0;}
+    for(auto& r:handled)if(r.type=="BLOCK_RECORD"&&raw(r.tags,5).isEmpty())r.tags.insert(1,tag(5,QString::number(nextHandle++,16).toUpper()));
+    QHash<QString,QByteArray> blockOwners;
+    for(const auto& r:handled)if(r.type=="BLOCK_RECORD")blockOwners.insert(str(r.tags,2),raw(r.tags,5));
+    QByteArray blockOwner;
+    for(auto& r:handled)if(r.section=="BLOCKS") {
+        if(r.type=="BLOCK")blockOwner=blockOwners.value(str(r.tags,2));
+        if(!blockOwner.isEmpty()&&raw(r.tags,330).isEmpty()&&r.type!="SECTION"&&r.type!="ENDSEC")r.tags.insert(2,{330,blockOwner});
+        if(r.type=="ENDBLK")blockOwner.clear();
+    }
+    QByteArray owner;qsizetype tableStart=-1;int tableCount=0;out.clear();
+    for(qsizetype index=0;index<handled.size();++index){
+        auto& r=handled[index];
+        if(r.type=="TABLE"){owner=raw(r.tags,5);tableStart=index;tableCount=0;}
         else if(r.type=="ENDTAB"){
             if(tableStart>=0)set(handled[tableStart].tags,70,QByteArray::number(tableCount));
             owner.clear();tableStart=-1;
@@ -574,7 +836,9 @@ void DxfAdapter::write(const Document& d,const QString& path) {
 }
 bool DxfAdapter::sourceLayerInUse(const Document& d,const QString& layer) {
     if(d.sourceDxf.isEmpty())return false;
-    for(const auto& r:records(parseTags(d.sourceDxf)))if(str(r.tags,8)==layer&&!d.importedKeys.contains(r.key))return true;
+    auto it=d.sourceLayerKeys.constFind(layer);
+    if(it==d.sourceLayerKeys.constEnd())return false;
+    for(const auto& key:*it)if(!d.importedKeys.contains(key))return true;
     return false;
 }
 }

@@ -11,6 +11,7 @@
 #include <cmath>
 #include "GenesisFixture.h"
 #include "MarkFixture.h"
+#include "TextDimensionFixture.h"
 #include "ConverterFixture.h"
 #include <QDir>
 
@@ -18,6 +19,32 @@ using namespace cad;
 class CoreTests : public QObject {
     Q_OBJECT
 private slots:
+    void legacyMifTextDecodingForSelectionBounds() {
+        auto source=QByteArray("0\nSECTION\n2\nENTITIES\n0\nMTEXT\n10\n0\n20\n0\n40\n3\n1\n\\M+19356\\M+192C3\\M+19056\n0\nENDSEC\n0\nEOF\n");
+        auto d=io::DxfAdapter::parse(source);QCOMPARE(d.entities.size(),1);auto text=d.entities.begin().value().text;
+        QVERIFY2(!text.contains("\\M+"),qPrintable(text));QCOMPARE(text.size(),3);
+        QVERIFY(io::DxfAdapter::serialize(d).contains("\\M+19356")); // untouched source remains verbatim
+    }
+    void deleteReadOnlySourceInstancesAndUndo() {
+        auto d=io::DxfAdapter::parse(editableDimensionFixture());Entity label;
+        for(const auto& e:d.entities)if(!e.dimensionTextKey.isEmpty()){label=e;break;}
+        QVERIFY(label.id);auto root=label.sourceKey.section('/',0,0);auto targets=d.deletionTargets({label.id});QVERIFY(targets.size()>=2);
+        QVERIFY(d.deleteEntities({label.id}));QVERIFY(d.deletedSources.contains(root));auto saved=io::DxfAdapter::serialize(d);QCOMPARE(saved.count("0\nDIMENSION\n"),1);
+        auto opened=io::DxfAdapter::parse(saved);QCOMPARE(opened.entities.size(),d.entities.size());QCOMPARE(saved.count("0\nBLOCK\n"),1);
+        QVERIFY(d.undo());QVERIFY(d.deletedSources.isEmpty());QCOMPARE(io::DxfAdapter::serialize(d).count("0\nDIMENSION\n"),2);QVERIFY(!d.modified());
+        QVERIFY(d.redo());QCOMPARE(io::DxfAdapter::parse(io::DxfAdapter::serialize(d)).entities.size(),opened.entities.size());
+        auto preview=io::DxfAdapter::parse(textDimensionFixture());QSet<EntityId> ids;for(const auto& e:preview.entities)ids.insert(e.id);
+        QVERIFY(preview.deleteEntities(ids));QVERIFY(preview.entities.isEmpty());QVERIFY(io::DxfAdapter::parse(io::DxfAdapter::serialize(preview)).entities.isEmpty());
+        QVERIFY(preview.undo());auto layers=preview.layers;for(auto& layer:layers)layer.locked=true;preview.changeLayers("lock",layers);QVERIFY(!preview.deleteEntities(ids));
+    }
+    void deleteDimensionOwnedAssociationObjects() {
+        auto source=editableDimensionFixture();
+        source.replace("0\nEOF\n","0\nSECTION\n2\nOBJECTS\n0\nDICTIONARY\n5\n20\n330\n11\n100\nAcDbDictionary\n280\n1\n281\n1\n3\nACAD_DIMASSOC\n360\n21\n0\nDIMASSOC\n5\n21\n330\n20\n100\nAcDbDimAssoc\n330\n11\n0\nENDSEC\n0\nEOF\n");
+        auto d=io::DxfAdapter::parse(source);Entity label;
+        auto ids=d.entities.keys();std::sort(ids.begin(),ids.end());for(auto id:ids)if(!d.entities[id].dimensionTextKey.isEmpty()){label=d.entities[id];break;}
+        QVERIFY(d.deleteEntities({label.id}));auto bytes=io::DxfAdapter::serialize(d);QVERIFY(!bytes.contains("0\nDIMASSOC\n"));QVERIFY(!bytes.contains("5\n20\n"));
+        QVERIFY(d.undo());QVERIFY(io::DxfAdapter::serialize(d).contains("0\nDIMASSOC\n"));
+    }
     void bulgeMetrics() {
         Entity e;e.kind=Kind::Polyline;e.points={{-5,0},{5,0}};e.closed=true;e.bulges={1,1};
         QVERIFY(std::abs(e.area()-geo::pi*25)<1e-8);QVERIFY(std::abs(e.length()-geo::pi*10)<1e-8);
@@ -25,10 +52,25 @@ private slots:
         auto pieces=edit::explode(e);QCOMPARE(pieces.size(),2);QCOMPARE(pieces[0].kind,Kind::Arc);
     }
     void history() {
-        Document d;Entity e;e.points={{0,0},{10,0}};d.commit("画线",{},{e});QVERIFY(d.modified());QCOMPARE(d.entities.size(),1);
+        Document d;Entity e;e.points={{0,0},{10,0}};auto ids=d.commit("画线",{},{e});QCOMPARE(ids.size(),1);QVERIFY(ids.first());QVERIFY(d.entities.contains(ids.first()));QVERIFY(d.modified());QCOMPARE(d.entities.size(),1);
         d.markSaved();auto before=d.entities.values().toVector();auto after=before;after[0].translate({3,4});d.commit("移动",before,after);
         QVERIFY(d.undo());QVERIFY(!d.modified());QVERIFY(d.redo());QVERIFY(d.modified());QCOMPARE(d.entities.begin()->points[0],QPointF(3,4));
         QVERIFY(d.undo());d.commit("删除",before,{});QVERIFY(!d.canRedo());QVERIFY(d.modified());
+    }
+    void historyTrimKeepsSavedCursorConsistent() {
+        Document d;Entity e;e.points={{0,0},{10,0}};
+        for(int i=0;i<120;++i){Entity line;line.points={{0,0},{double(i+1),0}};d.commit("draw",{},{line});}
+        d.markSaved();QVERIFY(!d.modified());
+        QVERIFY(d.undo());QVERIFY(d.modified());QVERIFY(d.redo());QVERIFY(!d.modified());
+        // Adding a branch at the saved cursor trims the oldest history entry and
+        // must move the saved cursor with it so undo returns to "saved".
+        d.commit("branch",{},{e});QVERIFY(d.modified());QVERIFY(d.undo());QVERIFY(!d.modified());
+    }
+    void dxfTextBackslashRoundTrip() {
+        Document d;Entity text;text.kind=Kind::Text;text.points={{0,0}};text.text="literal \\U+0041 and C:\\temp";d.load(text);
+        auto loaded=io::DxfAdapter::parse(io::DxfAdapter::serialize(d));
+        QCOMPARE(loaded.entities.size(),1);
+        QCOMPARE(loaded.entities.begin()->text,text.text);
     }
     void editing() {
         Entity e;e.kind=Kind::Rectangle;e.closed=true;e.points={{0,0},{10,0},{10,6},{0,6}};
@@ -146,6 +188,106 @@ private slots:
         QCOMPARE(reread.entities.size(),d.entities.size());
         qInfo()<<"Production mark drawing:"<<d.entities.size()<<"entities,"<<hatchCount<<"solid hatches";
         for(const auto& warning:d.warnings)qInfo().noquote()<<warning;
+    }
+    void importedTextAndDimensionPreviews() {
+        auto source=textDimensionFixture();auto d=io::DxfAdapter::parse(source);
+        QCOMPARE(d.entities.size(),4);int texts=0,lines=0;
+        for(const auto& e:d.entities) {
+            QVERIFY(e.readOnly);QVERIFY(!d.editable(e.id));
+            if(e.kind==Kind::Text){++texts;
+                if(e.points[0]==QPointF(50,60)){QCOMPARE(e.text,QString::fromUtf8("First\nSecond 1/2 中"));QCOMPARE(e.textVertical,3);}
+                if(e.points[0]==QPointF(40,50)){QCOMPARE(e.textHorizontal,2);QCOMPARE(e.textVertical,3);QCOMPARE(e.textWidthFactor,0.8);}
+            } else {++lines;QCOMPARE(e.points,QVector<QPointF>({{10,20},{30,20}}));QCOMPARE(e.layer,QString("DIMS"));}
+        }
+        QCOMPARE(texts,3);QCOMPARE(lines,1);
+        auto saved=io::DxfAdapter::serialize(d);
+        QVERIFY(saved.contains("0\nDIMENSION\n"));QVERIFY(saved.contains("3\n{\\C1;First\\P\n"));
+        QCOMPARE(io::DxfAdapter::parse(saved).entities.size(),4);
+        auto e=d.entities.begin().value(),changed=e;changed.translate({1,0});d.commit("invalid",{e},{changed});
+        QVERIFY_EXCEPTION_THROWN(io::DxfAdapter::serialize(d),std::runtime_error);
+        io::DxfReadOptions options;options.maxExpandedEntities=1;
+        QVERIFY_EXCEPTION_THROWN(io::DxfAdapter::parse(source,options),std::runtime_error);
+    }
+    void externalDimensionTextEditingRoundtrip() {
+        auto source=editableDimensionFixture();auto d=io::DxfAdapter::parse(source);
+        QCOMPARE(d.entities.size(),4);Entity label;
+        for(const auto& e:d.entities)if(!e.dimensionTextKey.isEmpty()){label=e;break;}
+        QVERIFY(label.id);QVERIFY(label.readOnly);QVERIFY(!d.editable(label.id));QVERIFY(d.textEditable(label.id));
+        QCOMPARE(label.dimensionAutoText,QString("120.000"));
+        QVERIFY(!d.editText(label.id,"bad\ntext"));QVERIFY(!d.editText(label.id,"\\H2;unsafe"));QVERIFY(!d.modified());
+        auto layers=d.layers;layers[label.layer].locked=true;d.changeLayers("lock",layers);
+        QVERIFY(!d.textEditable(label.id));QVERIFY(!d.editText(label.id,"121"));QVERIFY(d.undo());
+        QVERIFY(d.editText(label.id,"<>%%P0.1"));QCOMPARE(d.entities[label.id].text,QString("120.000%%P0.1"));
+        auto bytes=io::DxfAdapter::serialize(d);QVERIFY(bytes.contains("KEEP-DSTYLE"));QCOMPARE(bytes.count("0\nDIMENSION\n"),2);
+        QCOMPARE(bytes.count("0\nMTEXT\n"),2);QCOMPARE(bytes.count("0\nPOINT\n"),2);QCOMPARE(bytes.count("0\nBLOCK_RECORD\n"),2);
+        auto reread=io::DxfAdapter::parse(bytes);QCOMPARE(reread.entities.size(),4);int changed=0,unchanged=0;
+        for(const auto& e:reread.entities)if(e.kind==Kind::Text){
+            QCOMPARE(e.points,label.points);QCOMPARE(e.height,label.height);QCOMPARE(e.textHorizontal,label.textHorizontal);QCOMPARE(e.textVertical,label.textVertical);
+            if(e.text=="120.000%%P0.1")++changed;else if(e.text=="120.000%%P0.2")++unchanged;
+            QVERIFY(reread.textEditable(e.id));
+        }
+        QCOMPARE(changed,1);QCOMPARE(unchanged,1);
+        QVERIFY(d.undo());QVERIFY(!d.modified());QVERIFY(!io::DxfAdapter::serialize(d).contains("*DCADTEXT"));
+        QVERIFY(d.redo());QVERIFY(d.editText(label.id,QString::fromUtf8("119.80±0.15")));
+        reread=io::DxfAdapter::parse(io::DxfAdapter::serialize(d));bool found=false;
+        for(const auto& e:reread.entities)if(e.text==QString::fromUtf8("119.80±0.15")){found=true;QVERIFY(reread.editText(e.id,"<>%%P0.05"));}
+        QVERIFY(found);
+        auto before=d.entities.value(label.id),after=before;after.translate({1,0});d.commit("illegal",{before},{after});
+        QVERIFY_EXCEPTION_THROWN(io::DxfAdapter::serialize(d),std::runtime_error);
+    }
+    void repeatedSaveKeepsHandseedStable() {
+        auto bytes=io::DxfAdapter::serialize(Document::demo());
+        for(int i=0;i<3;++i){auto next=io::DxfAdapter::serialize(io::DxfAdapter::parse(bytes));QCOMPARE(next,bytes);bytes=next;}
+        auto source=editableDimensionFixture();
+        source.replace("1\nAC1024\n", "1\nAC1024\n9\n$HANDSEED\n5\nFFFF\n");
+        auto document=io::DxfAdapter::parse(source);auto ids=document.entities.keys();std::sort(ids.begin(),ids.end());
+        for(auto id:ids)if(!document.entities[id].dimensionTextKey.isEmpty()){QVERIFY(document.editText(id,"<>%%P0.05"));break;}
+        bytes=io::DxfAdapter::serialize(document);QVERIFY(bytes.contains("9\n$HANDSEED\n5\n100"));
+        QCOMPARE(io::DxfAdapter::serialize(io::DxfAdapter::parse(bytes)),bytes);
+    }
+    void localRedBoardDimensionEditing() {
+        auto path=qEnvironmentVariable("CAD_TEST_DIMENSION_DXF");if(path.isEmpty())QSKIP("Set CAD_TEST_DIMENSION_DXF for the red-board regression.");
+        auto d=io::DxfAdapter::read(path);Entity label;
+        int supported=0;for(const auto& e:d.entities)if(!e.dimensionTextKey.isEmpty()){
+            ++supported;if(e.text=="120.000%%P0.2")label=e;
+        }
+        QVERIFY2(label.id,"120.000%%P0.2 dimension must support text editing");
+        QVERIFY(d.editText(label.id,QString::fromUtf8("120.00±0.1")));
+        QTemporaryDir temp;auto output=qEnvironmentVariable("CAD_TEST_DIMENSION_OUTPUT",temp.filePath("edited.dxf"));io::DxfAdapter::write(d,output);
+        auto reread=io::DxfAdapter::read(output);QCOMPARE(reread.entities.size(),d.entities.size());bool found=false;
+        for(const auto& e:reread.entities)if(e.text==QString::fromUtf8("120.00±0.1")){
+            found=true;QCOMPARE(e.points,label.points);QVERIFY(reread.textEditable(e.id));
+        }
+        QVERIFY(found);qInfo()<<"Red board:"<<d.entities.size()<<"entities,"<<supported<<"editable dimension labels";
+    }
+    void mtextControlsChunksWidthAndNoise() {
+        QByteArray source="0\nSECTION\n2\nENTITIES\n0\nMTEXT\n10\n0\n20\n0\n30\n8.526512829121202e-14\n40\n2\n41\n12\n44\n1.2\n3\n\\U+62\n1\n80^J1) ABC^M^J2) DEF\\P3) GHI^ foo\n0\nENDSEC\n0\nEOF\n";
+        auto d=io::DxfAdapter::parse(source);QCOMPARE(d.entities.size(),1);auto e=d.entities.begin().value();
+        QCOMPARE(e.text,QString::fromUtf8("技\n1) ABC\n2) DEF\n3) GHI^foo"));
+        QCOMPARE(e.textBoxWidth,12.);QCOMPARE(e.textLineSpacing,1.2);QVERIFY(e.readOnly);
+        QCOMPARE(io::DxfAdapter::parse(io::DxfAdapter::serialize(d)).entities.begin()->text,e.text);
+        auto genuine3d=source;genuine3d.replace("8.526512829121202e-14","20");QVERIFY(io::DxfAdapter::parse(genuine3d).entities.isEmpty());
+        auto invalid=source;invalid.replace("41\n12","41\n-1");QVERIFY(io::DxfAdapter::parse(invalid).entities.isEmpty());
+    }
+    void wrappedTextNestedScale() {
+        QByteArray source="0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n2\nB\n10\n0\n20\n0\n0\nMTEXT\n10\n0\n20\n0\n40\n2\n41\n12\n1\nFirst^JSecond\n0\nENDBLK\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nINSERT\n2\nB\n10\n10\n20\n20\n41\n3\n42\n3\n0\nENDSEC\n0\nEOF\n";
+        auto d=io::DxfAdapter::parse(source);QCOMPARE(d.entities.size(),1);auto e=d.entities.begin().value();
+        QCOMPARE(e.height,6.);QCOMPARE(e.textBoxWidth,36.);QCOMPARE(e.points[0],QPointF(10,20));
+        QCOMPARE(io::DxfAdapter::parse(io::DxfAdapter::serialize(d)).entities.begin()->textBoxWidth,36.);
+    }
+    void dimensionInsideBlockAndLayoutWarning() {
+        auto source=textDimensionFixture();source.replace("0\nENDBLK\n0\nENDSEC", "0\nENDBLK\n0\nBLOCK\n2\nOUTER\n10\n0\n20\n0\n0\nDIMENSION\n2\n*D1\n0\nENDBLK\n0\nENDSEC");
+        source.replace("0\nENDSEC\n0\nEOF", "0\nINSERT\n2\nOUTER\n10\n5\n20\n6\n0\nLINE\n67\n1\n10\n0\n20\n0\n11\n1\n21\n0\n0\nENDSEC\n0\nEOF");
+        auto d=io::DxfAdapter::parse(source);QCOMPARE(d.entities.size(),6);
+        QVERIFY(d.warnings.join(' ').contains("布局/图纸空间"));
+        bool found=false;for(const auto& e:d.entities)if(e.kind==Kind::Line&&e.points[0]==QPointF(15,26)){found=true;QVERIFY(e.readOnly);}
+        QVERIFY(found);QCOMPARE(io::DxfAdapter::parse(io::DxfAdapter::serialize(d)).entities.size(),6);
+    }
+    void dimensionGraphicsAreNotInsertCoordinates() {
+        auto source=textDimensionFixture();source.replace("2\n*D1\n10\n0\n20\n0", "2\n*D1\n10\n7\n20\n9");
+        auto d=io::DxfAdapter::parse(source);
+        bool found=false;for(const auto& e:d.entities)if(e.kind==Kind::Line){found=true;QCOMPARE(e.points,QVector<QPointF>({{10,20},{30,20}}));}
+        QVERIFY(found);
     }
     void preserveSourceAndDelete() {
         QByteArray source="0\nSECTION\n2\nHEADER\n9\n$INSUNITS\n70\n4\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nLINE\n5\nAB\n8\n0\n6\nDASHED\n10\n0\n20\n0\n11\n10\n21\n0\n1001\nCUSTOM\n1000\nKEEPDATA\n0\nHATCH\n8\nKEEP\n62\n3\n0\nTEXT\n67\n1\n8\nPAPER\n1\nPAPER SPACE\n0\nENDSEC\n0\nEOF\n";

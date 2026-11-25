@@ -12,16 +12,27 @@
 
 namespace cad::io {
 static void fail(QString message){throw std::runtime_error(message.toUtf8().constData());}
+static QString findInPath(const QString& name) {
+    // Only search absolute PATH entries. This avoids executing a converter or
+    // reader planted in the current directory or in a relative PATH entry.
+    for(const auto& raw:qEnvironmentVariable("PATH").split(';')) {
+        auto entry=raw.trimmed();
+        if(entry.isEmpty()||!QFileInfo(entry).isAbsolute())continue;
+        QFileInfo candidate(QDir(entry).filePath(name));
+        if(candidate.isFile()&&candidate.isExecutable())return candidate.absoluteFilePath();
+    }
+    return {};
+}
 QString DwgAdapter::findConverter(const QString& configured) {
     auto executable=[](QString path) {
         QFileInfo info(path);
-        return info.isFile()&&info.isExecutable()?info.absoluteFilePath():QString{};
+        return info.isFile()&&info.isExecutable()&&info.size()>0?info.absoluteFilePath():QString{};
     };
     for(const auto& path:QStringList{configured,qEnvironmentVariable("CAD_ODA_CONVERTER"),
             QCoreApplication::applicationDirPath()+"/ODAFileConverter.exe",
             QCoreApplication::applicationDirPath()+"/oda/ODAFileConverter.exe",
             QCoreApplication::applicationDirPath()+"/tools/oda/ODAFileConverter.exe",
-            QStandardPaths::findExecutable("ODAFileConverter.exe")}) {
+            findInPath("ODAFileConverter.exe")}) {
         auto found=executable(path);if(!found.isEmpty())return found;
     }
     for(const auto& root:QStringList{qEnvironmentVariable("ProgramW6432"),qEnvironmentVariable("ProgramFiles"),qEnvironmentVariable("ProgramFiles(x86)")}) {
@@ -36,11 +47,11 @@ QString DwgAdapter::findConverter(const QString& configured) {
     return {};
 }
 QString DwgAdapter::findReader() {
-    auto executable=[](const QString& path){QFileInfo info(path);return info.isFile()&&info.isExecutable()?info.absoluteFilePath():QString{};};
+    auto executable=[](const QString& path){QFileInfo info(path);return info.isFile()&&info.isExecutable()&&info.size()>0?info.absoluteFilePath():QString{};};
     // An explicit environment override is authoritative, including an invalid/empty path.
     if(qEnvironmentVariableIsSet("CAD_LIBREDWG_READER"))return executable(qEnvironmentVariable("CAD_LIBREDWG_READER"));
     for(const auto& path:QStringList{QCoreApplication::applicationDirPath()+"/tools/libredwg/dwg2dxf.exe",
-            QCoreApplication::applicationDirPath()+"/dwg2dxf.exe",QStandardPaths::findExecutable("dwg2dxf.exe")}) {
+            QCoreApplication::applicationDirPath()+"/dwg2dxf.exe",findInPath("dwg2dxf.exe")}) {
         auto found=executable(path);if(!found.isEmpty())return found;
     }
     return {};

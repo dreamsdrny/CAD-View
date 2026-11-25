@@ -52,6 +52,8 @@ void MeasurePanel::addRecord(QString text, const QVector<EntityId>& ids) {
     QVariantList values;
     for(auto id:ids) if(id) values.append(QVariant::fromValue<qulonglong>(id));
     item->setData(Qt::UserRole,values);
+    // Keep the record widget bounded for long measurement sessions.
+    while(records_->count()>5000)delete records_->takeItem(0);
     records_->scrollToBottom();
 }
 void MeasurePanel::clearRecords() {

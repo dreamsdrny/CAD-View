@@ -18,6 +18,7 @@ struct Change {
     QVector<Entity> before, after;
     QMap<QString,Layer> layersBefore, layersAfter;
     int unitsBefore=4, unitsAfter=4;
+    QSet<QString> deletedSourcesBefore,deletedSourcesAfter;
 };
 class Document {
 public:
@@ -29,11 +30,17 @@ public:
     QByteArray sourceDxf;
     QHash<QString,Entity> baseline;
     QSet<QString> importedKeys;
+    QSet<QString> deletedSources; // Explicitly deleted top-level source records (not shared BLOCK definitions).
+    // Layer -> source record keys, built once while parsing so deleting a layer
+    // does not have to re-parse the whole original DXF.
+    QHash<QString,QSet<QString>> sourceLayerKeys;
     QStringList warnings;
 
     EntityId allocateId();
     void load(Entity e);
-    void commit(QString label, QVector<Entity> before, QVector<Entity> after);
+    // Returns the ids assigned to the entities in `after`, so callers can select
+    // or reference newly created objects. Empty when the change is a no-op.
+    QVector<EntityId> commit(QString label, QVector<Entity> before, QVector<Entity> after);
     void changeLayers(QString label, QMap<QString,Layer> next);
     void setUnits(int next);
     bool undo();
@@ -42,7 +49,13 @@ public:
     bool canRedo() const;
     bool modified() const;
     void markSaved();
+    void markUnsaved();
+    quint64 revision() const { return revision_; }
     bool editable(EntityId id) const;
+    bool textEditable(EntityId id) const;
+    bool editText(EntityId id, QString text);
+    QVector<Entity> deletionTargets(const QSet<EntityId>& ids) const;
+    bool deleteEntities(const QSet<EntityId>& ids);
     QVector<Entity> selected(const QSet<EntityId>& ids, bool editableOnly=false) const;
     QRectF bounds(bool visibleOnly=true) const;
     QString unitName() const;
@@ -60,6 +73,7 @@ private:
     qsizetype cursor_=0;
     qint64 savedCursor_=0;
     EntityId nextId_=1;
+    quint64 revision_=0;
     void apply(const Change& c,bool forward);
     void push(Change c);
 };

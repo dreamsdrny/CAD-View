@@ -16,12 +16,14 @@ if (-not (Test-Path -LiteralPath $root)) { throw 'Invalid project root.' }
 if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed.' }
 & $cmake --build $build --parallel 4
 if ($LASTEXITCODE -ne 0) { throw 'C++ build failed.' }
-if (-not $SkipTests) {
-    & $ctest --test-dir $build --output-on-failure
-    if ($LASTEXITCODE -ne 0) { throw 'Native tests failed.' }
-}
+# Deploy the Qt runtime and DWG helper before tests: some fixtures spawn helper
+# executables with an isolated PATH, so they need the DLLs next to the binaries.
 $bin = Join-Path $build 'bin'
 & "$PSScriptRoot\prepare-dwg-reader.ps1" -Destination (Join-Path $bin 'tools\libredwg')
 & "$QtRoot\bin\windeployqt.exe" --release --compiler-runtime --no-translations --no-opengl-sw "$bin\CAD.exe"
 if ($LASTEXITCODE -ne 0) { throw 'Qt runtime deployment failed.' }
+if (-not $SkipTests) {
+    & $ctest --test-dir $build --output-on-failure
+    if ($LASTEXITCODE -ne 0) { throw 'Native tests failed.' }
+}
 Write-Host "Ready: $bin\CAD.exe"

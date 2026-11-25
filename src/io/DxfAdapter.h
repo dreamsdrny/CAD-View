@@ -9,6 +9,8 @@ struct DxfReadOptions {
     qsizetype maxTags=4000000;
     qsizetype maxVerticesPerEntity=1000000;
     qsizetype maxExpandedEntities=2000000;
+    qsizetype maxExpandedBytes=512LL*1024*1024;
+    double maxCoordinate=1e9;
     int maxBlockDepth=32;
     std::function<bool()> cancelled;
 };

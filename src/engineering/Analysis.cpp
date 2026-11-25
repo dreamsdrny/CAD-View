@@ -3,12 +3,14 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <QCryptographicHash>
 #include <stdexcept>
 
 namespace cad::engineering {
 static bool contains(const Entity& e,QPointF p) {
-    if(e.kind==Kind::Circle)return geo::length(e.points[0],p)<e.radius;
+    if(e.kind==Kind::Circle)return e.points.size()>=1&&std::isfinite(e.radius)&&geo::length(e.points[0],p)<e.radius;
     if(!e.isClosed())return false;
+    if(!geo::finite(p))return false;
     geo::TessellationStatus status;auto outline=e.outline(0.005,&status);
     if(status.budgetExceeded)throw std::runtime_error(("曲线离散超过预算，实际误差上界："+value(status.maxError,9)).toUtf8().constData());
     return geo::inside(p,outline);
@@ -17,8 +19,8 @@ static bool insideOutline(QPointF p,const QVector<QPointF>& polygon) {
     return geo::inside(p,polygon);
 }
 double boundaryGap(const Entity& a,const Entity& b) {
-    if(a.kind==Kind::Circle&&b.kind==Kind::Circle){double d=geo::length(a.points[0],b.points[0]);return std::max({0.,d-a.radius-b.radius,std::abs(a.radius-b.radius)-d});}
-    if(a.kind==Kind::Circle||b.kind==Kind::Circle) {
+    if(a.kind==Kind::Circle&&b.kind==Kind::Circle&&a.points.size()>=1&&b.points.size()>=1){double d=geo::length(a.points[0],b.points[0]);return std::max({0.,d-a.radius-b.radius,std::abs(a.radius-b.radius)-d});}
+    if((a.kind==Kind::Circle&&a.points.size()>=1)||(b.kind==Kind::Circle&&b.points.size()>=1)) {
         const auto& circle=a.kind==Kind::Circle?a:b;const auto& other=a.kind==Kind::Circle?b:a;
         geo::TessellationStatus status;auto pts=other.outline(0.005,&status);if(status.budgetExceeded)throw std::runtime_error(("曲线离散超过预算，实际最大弦高误差："+value(status.maxError,9)).toUtf8().constData());double low=std::numeric_limits<double>::infinity(),high=0;
         for(auto p:pts)high=std::max(high,geo::length(p,circle.points[0]));
@@ -32,11 +34,14 @@ double boundaryGap(const Entity& a,const Entity& b) {
     }return minimum;
 }
 double clearance(const Entity& a,const Entity& b) {
+    if(a.points.isEmpty()||b.points.isEmpty())return 0;
     if(contains(a,b.points[0])||contains(b,a.points[0]))return 0;
     return boundaryGap(a,b);
 }
 QVector<Finding> holes(const QVector<Entity>& entities) {
-    QMap<qint64,QSet<EntityId>> groups;for(const auto& e:entities)if(e.kind==Kind::Circle)groups[qRound64(e.radius*2000)].insert(e.id);
+    QMap<qint64,QSet<EntityId>> groups;
+    for(const auto& e:entities)if(e.kind==Kind::Circle&&e.points.size()>=1&&std::isfinite(e.radius)&&std::abs(e.radius)<=4e15)
+        groups[qRound64(e.radius*2000)].insert(e.id);
     QVector<Finding> result;for(auto it=groups.begin();it!=groups.end();++it)result.append({QString("孔径 %1 · 数量 %2").arg(value(it.key()/1000.,3)).arg(it.value().size()),it.value(),it.key()/1000.});return result;
 }
 QVector<Finding> board(const Entity& e,const QString& unit) {
@@ -53,7 +58,7 @@ QVector<Finding> clearances(const QVector<Entity>& entities,double minimum) {
     SpatialIndex index;index.rebuild(d);QVector<Finding> result;
     for(const auto& a:d.entities)for(auto id:index.query(a.bounds().adjusted(-minimum,-minimum,minimum,minimum))) {
         if(id<=a.id)continue;
-        const auto& b=d.entities[id];
+        const auto& b=d.entities.value(id);
         if(geo::boxGap(a.bounds(),b.bounds())>=minimum)continue;
         double gap=clearance(a,b);if(gap<minimum)result.append({QString("间距 %1 < %2 · %3 / %4").arg(value(gap),value(minimum),a.layer,b.layer),{a.id,b.id},gap});
         if(result.size()>100000)throw std::runtime_error("检查结果超过 100000 条，请缩小选区或按图层检查。");
@@ -73,7 +78,7 @@ QVector<Finding> pads(const QVector<Entity>& entities,double width,double height
     QVector<Finding> result;for(const auto& e:entities)if(e.isClosed()&&e.kind!=Kind::SplinePreview) {
         double w=e.bounds().width(),h=e.bounds().height();
         if(e.kind==Kind::Circle)w=h=e.radius*2;
-        if(e.kind==Kind::Rectangle){w=geo::length(e.points[0],e.points[1]);h=geo::length(e.points[1],e.points[2]);}
+        if(e.kind==Kind::Rectangle&&e.points.size()>=3){w=geo::length(e.points[0],e.points[1]);h=geo::length(e.points[1],e.points[2]);}
         if(w<width||h<height)result.append({QString("尺寸 %1 × %2 小于 %3 × %4").arg(value(w),value(h),value(width),value(height)),{e.id},std::min(w,h)});
     }return result;
 }
@@ -95,7 +100,9 @@ QVector<Finding> duplicates(const QVector<Entity>& entities) {
         // Cleanup only merges identical manufacturing attributes, not just coincident outlines.
         key+="|"+e.layer+"|"+QString::number(e.color.isValid())+":"+e.color.name(QColor::HexArgb)+"|"+exact(e.constantWidth);
         for(const auto& width:e.widths)key+="|"+exact(width.first)+":"+exact(width.second);
-        key+="|source="+QString::fromLatin1(e.sourceAttributes.toBase64());
+        // Hash the potentially large source fingerprint instead of embedding its
+        // base64 text in every duplicate key (which doubled memory use).
+        key+="|source="+QString::fromLatin1(QCryptographicHash::hash(e.sourceAttributes,QCryptographicHash::Sha1).toHex());
         groups[key].insert(e.id);
     }
     QVector<Finding> result;for(const auto& ids:groups)if(ids.size()>1)result.append({QString("重复图形 × %1").arg(ids.size()),ids,double(ids.size())});return result;

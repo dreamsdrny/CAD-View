@@ -23,6 +23,12 @@ public:
     QPointF screenAt(QPointF model) const;
     void synchronize();
     void fitDrawing();
+    // Move the drawing on screen by a pixel delta. Positive X/Y move the
+    // drawing right/down; arrow keys use this so the sheet follows the key.
+    void panByPixels(QPointF delta);
+    // Zoom around the mouse position when it is over the canvas, otherwise
+    // around the viewport centre.
+    void zoomBy(double factor);
     void setTool(Tool tool);
     void acceptPoint(QPointF point);
     void finish(bool closed=false);
@@ -37,6 +43,7 @@ public:
 signals:
     void documentChanged();
     void selectionChanged();
+    void textEditRequested();
     void message(QString text);
     void coordinates(QPointF point);
     void toolChanged();
@@ -49,6 +56,7 @@ protected:
     void paintEvent(QPaintEvent*) override;
     void wheelEvent(QWheelEvent*) override;
     void mousePressEvent(QMouseEvent*) override;
+    void mouseDoubleClickEvent(QMouseEvent*) override;
     void mouseMoveEvent(QMouseEvent*) override;
     void mouseReleaseEvent(QMouseEvent*) override;
     void keyPressEvent(QKeyEvent*) override;
@@ -61,16 +69,18 @@ private:
     QPointF center_{},cursor_{};
     QPointF origin_{};
     double scale_=8;
-    bool panning_=false,dragging_=false,hasCursor_=false;
-    QPointF lastPan_,dragStart_,dragEnd_;
+    bool panning_=false,dragging_=false,hasCursor_=false,hasMouseScreen_=false;
+    QPointF lastPan_,dragStart_,dragEnd_,lastMouseScreen_;
     std::optional<QPair<QPointF,QString>> snapPoint_;
     EntityId gapFirst_=0, gapHover_=0;
     std::optional<measure::Gap> gapPreview_;
     QTransform viewTransform() const;
     const QPainterPath& cachedPath(EntityId id);
     QPointF constrained(QPointF point);
+    void refreshCursorFromMouse();
     EntityId add(Entity entity);
     EntityId pickEntity(QPointF modelPosition, bool measurableOnly = false);
+    EntityId pickTextForEditing(QPointF modelPosition);
     void pickForGap(QPointF modelPosition);
     QString gapReport(const Entity& first, const Entity& second, const measure::Gap& result) const;
 };
